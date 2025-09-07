@@ -13,7 +13,9 @@ func (m model) View() string {
 			Background(lipgloss.Color("#1A1A2E")).
 			Padding(1, 2).
 			Border(lipgloss.RoundedBorder()).
-			BorderForeground(lipgloss.Color("#FF6B9D"))
+			BorderForeground(lipgloss.Color("#FF6B9D")).
+			Width(m.width - 8). // Full width with padding
+			Align(lipgloss.Center)
 		return goodbyeStyle.Render("✨ Goodbye! Thanks for using Deadwood! ✨") + "\n"
 	}
 	var b strings.Builder
@@ -26,7 +28,9 @@ func (m model) View() string {
 		Padding(0, 2).
 		Border(lipgloss.RoundedBorder()).
 		BorderForeground(lipgloss.Color("#A29BFE")).
-		MarginBottom(1)
+		MarginBottom(1).
+		Width(m.width - 8). // Full width with padding
+		Align(lipgloss.Center)
 	b.WriteString(titleStyle.Render("🌲 Deadwood - Git Branch Manager 🌲"))
 	b.WriteString("\n")
 
@@ -35,7 +39,9 @@ func (m model) View() string {
 		Foreground(lipgloss.Color("#00CEC9")).
 		Bold(true).
 		Padding(0, 1).
-		MarginBottom(1)
+		MarginBottom(1).
+		Width(m.width - 8). // Full width with padding
+		Align(lipgloss.Center)
 	b.WriteString(descStyle.Render("🚀 A beautiful TUI for managing git branches: select, delete, rename, batch ops 🚀"))
 	b.WriteString("\n\n")
 
@@ -44,7 +50,8 @@ func (m model) View() string {
 		Border(lipgloss.RoundedBorder()).
 		BorderForeground(lipgloss.Color("#74B9FF")).
 		Background(lipgloss.Color("#2D3436")).
-		Padding(1, 2)
+		Padding(1, 2).
+		Width(m.width - 8) // Full width with padding
 	b.WriteString(tableStyle.Render(m.table.View()))
 	b.WriteString("\n")
 
@@ -57,7 +64,9 @@ func (m model) View() string {
 			Padding(0, 1).
 			Border(lipgloss.RoundedBorder()).
 			BorderForeground(lipgloss.Color("#FF7675")).
-			MarginTop(1)
+			MarginTop(1).
+			Width(m.width - 8). // Full width with padding
+			Align(lipgloss.Center)
 		b.WriteString("\n" + errorStyle.Render("⚠️  " + m.errMsg + "  ⚠️") + "\n")
 	}
 
@@ -70,7 +79,9 @@ func (m model) View() string {
 		Padding(1, 2).
 		Border(lipgloss.RoundedBorder()).
 		BorderForeground(lipgloss.Color("#FDCB6E")).
-		MarginTop(1)
+		MarginTop(1).
+		Width(m.width - 8). // Full width with padding
+		Align(lipgloss.Center)
 	b.WriteString(helpStyle.Render(help))
 
 	// Confirmation or input with enhanced styling
@@ -83,7 +94,9 @@ func (m model) View() string {
 			Padding(1, 2).
 			Border(lipgloss.RoundedBorder()).
 			BorderForeground(lipgloss.Color("#E17055")).
-			MarginTop(1)
+			MarginTop(1).
+			Width(m.width - 8). // Full width with padding
+			Align(lipgloss.Center)
 		b.WriteString("\n" + confirmStyle.Render("🔥 " + m.confirmMsg + " 🔥") + "\n")
 	case "input-rename":
 		inputStyle := lipgloss.NewStyle().
@@ -93,7 +106,9 @@ func (m model) View() string {
 			Padding(1, 2).
 			Border(lipgloss.RoundedBorder()).
 			BorderForeground(lipgloss.Color("#55A3FF")).
-			MarginTop(1)
+			MarginTop(1).
+			Width(m.width - 8). // Full width with padding
+			Align(lipgloss.Center)
 		b.WriteString("\n" + inputStyle.Render("✏️  Rename branch to: " + m.input.View() + "  ✏️") + "\n")
 	}
 	return b.String()

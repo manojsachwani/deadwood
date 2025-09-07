@@ -34,6 +34,8 @@ type model struct {
 	errMsg       string
 	confirmMsg   string
 	remoteDelete bool
+	width        int
+	height       int
 }
 
 func initialModel() model {
@@ -58,17 +60,22 @@ func initialModel() model {
        }
        columns := []table.Column{
 	       {Title: "Select", Width: 8},
-	       {Title: "Branch", Width: 30},
-	       {Title: "Status", Width: 10},
-	       {Title: "Commit", Width: 10},
-	       {Title: "Author", Width: 18},
+	       {Title: "Branch", Width: 25},
+	       {Title: "Status", Width: 12},
+	       {Title: "Commit", Width: 12},
+	       {Title: "Author", Width: 20},
        }
+       
+       // Initial dimensions - will be updated on first WindowSizeMsg
+       initialWidth := 100
+       initialHeight := 24
+       
        t := table.New(
 	       table.WithColumns(columns),
 	       table.WithRows(rows),
 	       table.WithFocused(true),
 	       table.WithHeight(12),
-	       table.WithWidth(80),
+	       table.WithWidth(initialWidth-8), // Leave padding for borders
        )
        // Custom colorful table styles
        s := table.DefaultStyles()
@@ -89,7 +96,15 @@ func initialModel() model {
        ti := textinput.New()
        ti.Placeholder = "New branch name"
        ti.CharLimit = 64
-       return model{table: t, branches: branches, multi: make(map[int]struct{}), mode: "list", input: ti}
+       return model{
+	       table: t, 
+	       branches: branches, 
+	       multi: make(map[int]struct{}), 
+	       mode: "list", 
+	       input: ti,
+	       width: initialWidth,
+	       height: initialHeight,
+       }
 }
 
 func (m model) Init() tea.Cmd {
@@ -97,7 +112,16 @@ func (m model) Init() tea.Cmd {
 }
 
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
-       switch m.mode {
+	// Handle window size changes for all modes
+	if msg, ok := msg.(tea.WindowSizeMsg); ok {
+		m.width = msg.Width
+		m.height = msg.Height
+		// Update table width to fit screen with padding
+		m.table.SetWidth(m.width - 8) // Leave 4 characters padding on each side
+		return m, nil
+	}
+
+	switch m.mode {
        case "list":
 	       switch msg := msg.(type) {
 	       case tea.KeyMsg:
