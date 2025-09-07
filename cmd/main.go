@@ -1,3 +1,7 @@
+
+
+
+
 package main
 
 import (
@@ -5,9 +9,8 @@ import (
 	"os"
 	"strings"
 	tea "github.com/charmbracelet/bubbletea"
-	list "github.com/charmbracelet/bubbles/list"
+	table "github.com/charmbracelet/bubbles/table"
 	textinput "github.com/charmbracelet/bubbles/textinput"
-	"github.com/charmbracelet/lipgloss"
 	"github.com/yourusername/deadwood/git"
 )
 
@@ -18,8 +21,9 @@ type branchItem struct {
 func (b branchItem) Title() string    { return b.branch.Name }
 func (b branchItem) Description() string { if b.branch.Current { return "(current)" } else { return "" } }
 func (b branchItem) FilterValue() string { return b.branch.Name }
+
 type model struct {
-	list         list.Model
+	table        table.Model
 	branches     []git.Branch
 	quitting     bool
 	multi        map[int]struct{}
@@ -32,23 +36,40 @@ type model struct {
 }
 
 func initialModel() model {
-	branches, err := git.ListBranches()
-	if err != nil {
-		fmt.Println("Error listing branches:", err)
-		os.Exit(1)
-	}
-	items := make([]list.Item, len(branches))
-	for i, b := range branches {
-		items[i] = branchItem{branch: b}
-	}
-	l := list.New(items, list.NewDefaultDelegate(), 0, 0)
-	l.Title = "Select branches (space to select, d: delete, r: rename, q: quit)"
-	l.SetShowStatusBar(false)
-	l.SetFilteringEnabled(false)
-	ti := textinput.New()
-	ti.Placeholder = "New branch name"
-	ti.CharLimit = 64
-	return model{list: l, branches: branches, multi: make(map[int]struct{}), mode: "list", input: ti}
+       branches, err := git.ListBranches()
+       if err != nil {
+	       fmt.Println("Error listing branches:", err)
+	       os.Exit(1)
+       }
+       rows := make([]table.Row, len(branches))
+       for i, b := range branches {
+	       rows[i] = table.Row{
+		       "[ ]",
+		       b.Name,
+		       func() string { if b.Current { return "(current)" } else { return "" } }(),
+		       b.Commit,
+		       b.Author,
+	       }
+       }
+       columns := []table.Column{
+	       {Title: "Select", Width: 8},
+	       {Title: "Branch", Width: 30},
+	       {Title: "Status", Width: 10},
+	       {Title: "Commit", Width: 10},
+	       {Title: "Author", Width: 18},
+       }
+       t := table.New(
+	       table.WithColumns(columns),
+	       table.WithRows(rows),
+	       table.WithFocused(true),
+	       table.WithHeight(12),
+	       table.WithWidth(80),
+       )
+       t.SetStyles(table.DefaultStyles())
+       ti := textinput.New()
+       ti.Placeholder = "New branch name"
+       ti.CharLimit = 64
+       return model{table: t, branches: branches, multi: make(map[int]struct{}), mode: "list", input: ti}
 }
 
 func (m model) Init() tea.Cmd {
@@ -56,45 +77,55 @@ func (m model) Init() tea.Cmd {
 }
 
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
-	switch m.mode {
-	case "list":
-		switch msg := msg.(type) {
-		case tea.KeyMsg:
-			switch msg.String() {
-			case "ctrl+c", "q":
-				m.quitting = true
-				return m, tea.Quit
-			case " ":
-				idx := m.list.Index()
-				if _, ok := m.multi[idx]; ok {
-					delete(m.multi, idx)
-				} else {
-					m.multi[idx] = struct{}{}
-				}
-				return m, nil
-			case "d":
-				if len(m.multi) == 0 {
-					m.errMsg = "No branches selected. Use space to select."
-					return m, nil
-				}
-				m.mode = "confirm-remote"
-				m.action = "delete"
-				m.confirmMsg = "Delete selected branches locally only (l) or also remotely (r)?"
-				return m, nil
-			case "r":
-				if len(m.multi) != 1 {
-					m.errMsg = "Select exactly one branch to rename."
-					return m, nil
-				}
-				m.mode = "input-rename"
-				m.action = "rename"
-				m.input.SetValue("")
-				return m, textinput.Blink
-			}
-		}
-		var cmd tea.Cmd
-		m.list, cmd = m.list.Update(msg)
-		return m, cmd
+       switch m.mode {
+       case "list":
+	       switch msg := msg.(type) {
+	       case tea.KeyMsg:
+		       switch msg.String() {
+		       case "ctrl+c", "q":
+			       m.quitting = true
+			       return m, tea.Quit
+		       case " ":
+		       idx := m.table.Cursor()
+		       if _, ok := m.multi[idx]; ok {
+			       delete(m.multi, idx)
+		       } else {
+			       m.multi[idx] = struct{}{}
+		       }
+		       // Update rows to reflect selection
+		       rows := make([]table.Row, len(m.branches))
+		       for i, b := range m.branches {
+			       checked := "[ ]"
+			       if _, ok := m.multi[i]; ok {
+				       checked = "[x]"
+			       }
+			       rows[i] = table.Row{checked, b.Name, func() string { if b.Current { return "(current)" } else { return "" } }()}
+		       }
+		       m.table.SetRows(rows)
+		       return m, nil
+		       case "d":
+			       if len(m.multi) == 0 {
+				       m.errMsg = "No branches selected. Use space to select."
+				       return m, nil
+			       }
+			       m.mode = "confirm-remote"
+			       m.action = "delete"
+			       m.confirmMsg = "Delete selected branches locally only (l) or also remotely (r)?"
+			       return m, nil
+		       case "r":
+			       if len(m.multi) != 1 {
+				       m.errMsg = "Select exactly one branch to rename."
+				       return m, nil
+			       }
+			       m.mode = "input-rename"
+			       m.action = "rename"
+			       m.input.SetValue("")
+			       return m, textinput.Blink
+		       }
+	       }
+	       var cmd tea.Cmd
+	       m.table, cmd = m.table.Update(msg)
+	       return m, cmd
 	case "confirm-remote":
 		if key, ok := msg.(tea.KeyMsg); ok {
 			switch key.String() {
@@ -137,14 +168,18 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 				m.mode = "list"
 				m.multi = make(map[int]struct{})
-				// Refresh list
-				branches, _ := git.ListBranches()
-				m.branches = branches
-				items := make([]list.Item, len(branches))
-				for i, b := range branches {
-					items[i] = branchItem{branch: b}
-				}
-				m.list.SetItems(items)
+		       // Refresh table
+		       branches, _ := git.ListBranches()
+		       m.branches = branches
+		       rows := make([]table.Row, len(branches))
+		       for i, b := range branches {
+			       checked := "[ ]"
+			       if _, ok := m.multi[i]; ok {
+				       checked = "[x]"
+			       }
+			       rows[i] = table.Row{checked, b.Name, func() string { if b.Current { return "(current)" } else { return "" } }()}
+		       }
+		       m.table.SetRows(rows)
 				return m, nil
 			case "n", "q", "esc":
 				m.mode = "list"
@@ -174,14 +209,18 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 				m.mode = "list"
 				m.multi = make(map[int]struct{})
-				// Refresh list
-				branches, _ := git.ListBranches()
-				m.branches = branches
-				items := make([]list.Item, len(branches))
-				for i, b := range branches {
-					items[i] = branchItem{branch: b}
-				}
-				m.list.SetItems(items)
+		       // Refresh table
+		       branches, _ := git.ListBranches()
+		       m.branches = branches
+		       rows := make([]table.Row, len(branches))
+		       for i, b := range branches {
+			       checked := "[ ]"
+			       if _, ok := m.multi[i]; ok {
+				       checked = "[x]"
+			       }
+			       rows[i] = table.Row{checked, b.Name, func() string { if b.Current { return "(current)" } else { return "" } }()}
+		       }
+		       m.table.SetRows(rows)
 				return m, nil
 			case "esc", "q":
 				m.mode = "list"
@@ -193,31 +232,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-func (m model) View() string {
-	if m.quitting {
-		return "Goodbye!\n"
-	}
-	var b strings.Builder
-	b.WriteString(lipgloss.NewStyle().Padding(1, 2).Render(m.list.View()))
-	// Show multi-select marks
-	if m.mode == "list" && len(m.multi) > 0 {
-		b.WriteString("\nSelected: ")
-		for idx := range m.multi {
-			b.WriteString(m.branches[idx].Name + ", ")
-		}
-		b.WriteString("\n")
-	}
-	if m.errMsg != "" {
-		b.WriteString("\n" + lipgloss.NewStyle().Foreground(lipgloss.Color("9")).Render(m.errMsg) + "\n")
-	}
-	switch m.mode {
-	case "confirm-remote", "confirm-delete":
-		b.WriteString("\n" + m.confirmMsg + "\n")
-	case "input-rename":
-		b.WriteString("\nRename branch to: " + m.input.View() + "\n")
-	}
-	return b.String()
-}
+
 
 func main() {
        p := tea.NewProgram(initialModel())
