@@ -17,16 +17,22 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
-          go-version: "1.21"
+          go-version: "1.23"
       - name: Build
         run: |
           mkdir -p dist
-          GOOS=${{ matrix.goos }} GOARCH=${{ matrix.goarch }} go build -o dist/deadwood-${{ matrix.goos }}-${{ matrix.goarch }} ./cmd/main.go
+          if [ "${{ matrix.goos }}" = "windows" ]; then
+            GOOS=${{ matrix.goos }} GOARCH=${{ matrix.goarch }} go build -o dist/deadwood-${{ matrix.goos }}-${{ matrix.goarch }}.exe ./cmd/
+          else
+            GOOS=${{ matrix.goos }} GOARCH=${{ matrix.goarch }} go build -o dist/deadwood-${{ matrix.goos }}-${{ matrix.goarch }} ./cmd/
+          fi
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
           name: deadwood-${{ matrix.goos }}-${{ matrix.goarch }}
-          path: dist/deadwood-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: |
+            dist/deadwood-${{ matrix.goos }}-${{ matrix.goarch }}
+            dist/deadwood-${{ matrix.goos }}-${{ matrix.goarch }}.exe
 
   release:
     needs: build
