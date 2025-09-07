@@ -11,6 +11,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	table "github.com/charmbracelet/bubbles/table"
 	textinput "github.com/charmbracelet/bubbles/textinput"
+	"github.com/charmbracelet/lipgloss"
 	"github.com/yourusername/deadwood/git"
 )
 
@@ -43,10 +44,14 @@ func initialModel() model {
        }
        rows := make([]table.Row, len(branches))
        for i, b := range branches {
+	       status := ""
+	       if b.Current {
+		       status = "👑 current"
+	       }
 	       rows[i] = table.Row{
-		       "[ ]",
+		       "⚪",
 		       b.Name,
-		       func() string { if b.Current { return "(current)" } else { return "" } }(),
+		       status,
 		       b.Commit,
 		       b.Author,
 	       }
@@ -65,7 +70,22 @@ func initialModel() model {
 	       table.WithHeight(12),
 	       table.WithWidth(80),
        )
-       t.SetStyles(table.DefaultStyles())
+       // Custom colorful table styles
+       s := table.DefaultStyles()
+       s.Header = s.Header.
+               BorderStyle(lipgloss.NormalBorder()).
+               BorderForeground(lipgloss.Color("#74B9FF")).
+               BorderBottom(true).
+               Bold(true).
+               Foreground(lipgloss.Color("#FFFFFF")).
+               Background(lipgloss.Color("#6C5CE7"))
+       s.Selected = s.Selected.
+               Foreground(lipgloss.Color("#FFFFFF")).
+               Background(lipgloss.Color("#00B894")).
+               Bold(true)
+       s.Cell = s.Cell.
+               Foreground(lipgloss.Color("#DDD6FE"))
+       t.SetStyles(s)
        ti := textinput.New()
        ti.Placeholder = "New branch name"
        ti.CharLimit = 64
@@ -95,11 +115,15 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		       // Update rows to reflect selection
 		       rows := make([]table.Row, len(m.branches))
 		       for i, b := range m.branches {
-			       checked := "[ ]"
+			       checked := "⚪"
 			       if _, ok := m.multi[i]; ok {
-				       checked = "[x]"
+				       checked = "🟢"
 			       }
-			       rows[i] = table.Row{checked, b.Name, func() string { if b.Current { return "(current)" } else { return "" } }()}
+			       status := ""
+			       if b.Current {
+				       status = "👑 current"
+			       }
+			       rows[i] = table.Row{checked, b.Name, status, b.Commit, b.Author}
 		       }
 		       m.table.SetRows(rows)
 		       return m, nil
@@ -173,11 +197,15 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		       m.branches = branches
 		       rows := make([]table.Row, len(branches))
 		       for i, b := range branches {
-			       checked := "[ ]"
+			       checked := "⚪"
 			       if _, ok := m.multi[i]; ok {
-				       checked = "[x]"
+				       checked = "🟢"
 			       }
-			       rows[i] = table.Row{checked, b.Name, func() string { if b.Current { return "(current)" } else { return "" } }()}
+			       status := ""
+			       if b.Current {
+				       status = "👑 current"
+			       }
+			       rows[i] = table.Row{checked, b.Name, status, b.Commit, b.Author}
 		       }
 		       m.table.SetRows(rows)
 				return m, nil
@@ -214,11 +242,15 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		       m.branches = branches
 		       rows := make([]table.Row, len(branches))
 		       for i, b := range branches {
-			       checked := "[ ]"
+			       checked := "⚪"
 			       if _, ok := m.multi[i]; ok {
-				       checked = "[x]"
+				       checked = "🟢"
 			       }
-			       rows[i] = table.Row{checked, b.Name, func() string { if b.Current { return "(current)" } else { return "" } }()}
+			       status := ""
+			       if b.Current {
+				       status = "👑 current"
+			       }
+			       rows[i] = table.Row{checked, b.Name, status, b.Commit, b.Author}
 		       }
 		       m.table.SetRows(rows)
 				return m, nil
