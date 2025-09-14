@@ -1,8 +1,8 @@
 package main
 
 import (
-	"strings"
 	"github.com/charmbracelet/lipgloss"
+	"strings"
 )
 
 func (m model) View() string {
@@ -67,7 +67,7 @@ func (m model) View() string {
 			MarginTop(1).
 			Width(m.width - 8). // Full width with padding
 			Align(lipgloss.Center)
-		b.WriteString("\n" + errorStyle.Render("⚠️  " + m.errMsg + "  ⚠️") + "\n")
+		b.WriteString("\n" + errorStyle.Render("⚠️  "+m.errMsg+"  ⚠️") + "\n")
 	}
 
 	// Help box with colorful styling
@@ -97,7 +97,7 @@ func (m model) View() string {
 			MarginTop(1).
 			Width(m.width - 8). // Full width with padding
 			Align(lipgloss.Center)
-		b.WriteString("\n" + confirmStyle.Render("🔥 " + m.confirmMsg + " 🔥") + "\n")
+		b.WriteString("\n" + confirmStyle.Render("🔥 "+m.confirmMsg+" 🔥") + "\n")
 	case "input-rename":
 		inputStyle := lipgloss.NewStyle().
 			Foreground(lipgloss.Color("#55A3FF")).
@@ -109,7 +109,7 @@ func (m model) View() string {
 			MarginTop(1).
 			Width(m.width - 8). // Full width with padding
 			Align(lipgloss.Center)
-		b.WriteString("\n" + inputStyle.Render("✏️  Rename branch to: " + m.input.View() + "  ✏️") + "\n")
+		b.WriteString("\n" + inputStyle.Render("✏️  Rename branch to: "+m.input.View()+"  ✏️") + "\n")
 	}
 	return b.String()
 }
