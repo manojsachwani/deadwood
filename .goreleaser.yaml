@@ -62,10 +62,12 @@ homebrew_casks:
       name: goreleaserbot
       email: bot@goreleaser.com
     # The binaries are not signed or notarized, so macOS quarantines them
-    # when Homebrew downloads the archive. This lifts the quarantine.
-    hooks:
-      post:
-        install: |
-          if OS.mac?
-            system_command "/usr/bin/xattr", args: ["-dr", "com.apple.quarantine", "#{staged_path}/deadwood"]
-          end
+    # when Homebrew downloads the archive. This lifts the quarantine. It is a
+    # custom block because the `hooks` option emits the deprecated
+    # `postflight do` form; Homebrew wants `postflight_steps`.
+    custom_block: |
+      on_macos do
+        postflight_steps do
+          run "/usr/bin/xattr", args: ["-dr", "com.apple.quarantine", "{{ "{{staged_path}}" }}/deadwood"]
+        end
+      end
