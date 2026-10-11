@@ -342,6 +342,9 @@ func (m model) detailText(width int) string {
 	if b.Stale && stateLabel(b) != "stale" {
 		facts = append(facts, "stale")
 	}
+	if b.CI != "" {
+		facts = append(facts, "CI "+b.CI)
+	}
 	out.WriteString(mutedStyle.Render(strings.Join(facts, "  ·  ")) + "\n\n")
 
 	if m.detail == nil {

@@ -641,3 +641,47 @@ func TestPullRequestMergeSignal(t *testing.T) {
 		t.Errorf("without the option gh must not be consulted, got %q", b.Merge)
 	}
 }
+
+func TestCIStatus(t *testing.T) {
+	initRepo(t)
+	for _, name := range []string{"green", "red", "busy", "rerun", "unpushed"} {
+		mustGit(t, "checkout", "-q", "-b", name, "main")
+		commitFile(t, name+".txt", "x\n", "work on "+name)
+	}
+	mustGit(t, "checkout", "-q", "main")
+	sha := func(name string) string { return find(t, name).SHA }
+
+	run := func(name, workflow, status, conclusion string) string {
+		return `{"headSha":"` + sha(name) + `","workflowName":"` + workflow + `","status":"` + status + `","conclusion":"` + conclusion + `"}`
+	}
+	// Newest first, as gh prints them. "rerun" failed once and then passed.
+	runs := strings.Join([]string{
+		run("green", "CI", "completed", "success"),
+		run("green", "Lint", "completed", "skipped"),
+		run("red", "CI", "completed", "success"),
+		run("red", "Lint", "completed", "failure"),
+		run("busy", "CI", "in_progress", ""),
+		run("busy", "Lint", "completed", "success"),
+		run("rerun", "CI", "completed", "success"),
+		run("rerun", "CI", "completed", "failure"),
+	}, ",")
+	bin := t.TempDir()
+	if err := os.WriteFile(filepath.Join(bin, "gh"), []byte("#!/bin/sh\ncat <<'JSON'\n["+runs+"]\nJSON\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	branches, err := ListBranches(Options{Base: "main", CI: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]string{"green": CIPass, "red": CIFail, "busy": CIRunning, "rerun": CIPass, "unpushed": ""}
+	for _, b := range branches {
+		if expected, ok := want[b.Name]; ok && b.CI != expected {
+			t.Errorf("%s: CI = %q, want %q", b.Name, b.CI, expected)
+		}
+	}
+	if b := find(t, "green"); b.CI != "" {
+		t.Errorf("without the option gh must not be consulted, got %q", b.CI)
+	}
+}

@@ -32,6 +32,7 @@ Flags:
                       (default 90, 0 disables)
   --prs               also treat branches as merged when the GitHub CLI (gh)
                       reports their pull request as merged
+  --ci                show the CI result of each branch tip (needs gh)
   --list              print the branches and their state, then exit
   --json              like --list, as JSON including worktrees
   --version           print the version
@@ -41,12 +42,14 @@ Clean flags (deadwood clean):
   --yes               delete; without it the candidates are only listed
   --stale             also delete stale branches, merged or not
   --remote            delete their upstream branches too
+  --json              report what was (or would be) deleted as JSON
   --base, --stale-days, --prs as above
 
 Configuration (git config):
   deadwood.base           default for --base
   deadwood.staleDays      default for --stale-days
   deadwood.pullRequests   true to enable --prs by default
+  deadwood.ci             true to enable --ci by default
   deadwood.protect        glob of branch names never deleted (repeatable)
   deadwood.theme          default, ocean, ember or mono
   deadwood.keys.<action>  remap a key, e.g. deadwood.keys.delete x
@@ -66,6 +69,7 @@ func main() {
 		base        = flag.String("base", "", "")
 		staleDays   = flag.Int("stale-days", -1, "")
 		prs         = flag.Bool("prs", false, "")
+		ci          = flag.Bool("ci", false, "")
 		list        = flag.Bool("list", false, "")
 		asJSON      = flag.Bool("json", false, "")
 		showVersion = flag.Bool("version", false, "")
@@ -87,6 +91,7 @@ func main() {
 		fail(err)
 	}
 	opts.PullRequests = opts.PullRequests || *prs
+	opts.CI = opts.CI || *ci
 
 	if *list || *asJSON {
 		if err := printList(opts, *asJSON); err != nil {
@@ -137,6 +142,7 @@ func runClean(args []string) {
 		yes       = fs.Bool("yes", false, "")
 		stale     = fs.Bool("stale", false, "")
 		remote    = fs.Bool("remote", false, "")
+		asJSON    = fs.Bool("json", false, "")
 	)
 	fs.Bool("merged", true, "") // accepted for readability; merged branches are always included
 	fs.Bool("dry-run", false, "")
@@ -162,6 +168,10 @@ func runClean(args []string) {
 			targets = append(targets, b)
 		}
 	}
+	if *asJSON {
+		cleanJSON(opts.Base, targets, *yes, *remote)
+		return
+	}
 	if len(targets) == 0 {
 		fmt.Println("Nothing to clean.")
 		return
@@ -178,25 +188,70 @@ func runClean(args []string) {
 		return
 	}
 
-	failed := 0
+	failed := false
 	for _, b := range targets {
-		remoteDeleted, err := git.DeleteBranch(b, *remote)
-		switch {
-		case err != nil && git.BranchExists(b.Name):
-			failed++
-			fmt.Fprintf(os.Stderr, "deadwood: %s: %v\n", b.Name, err)
+		r := cleanOne(b, *remote)
+		if r.Error != "" {
+			failed = true
+			fmt.Fprintf(os.Stderr, "deadwood: %s: %s\n", b.Name, r.Error)
+		}
+		if !r.Deleted {
 			continue
-		case err != nil:
-			failed++
-			fmt.Fprintf(os.Stderr, "deadwood: %s: %v\n", b.Name, err)
 		}
 		suffix := ""
-		if remoteDeleted {
+		if r.RemoteDeleted {
 			suffix = " and " + b.Upstream
 		}
 		fmt.Printf("Deleted %s%s. Restore with: git branch %s %s\n", b.Name, suffix, b.Name, b.SHA)
 	}
-	if failed > 0 {
+	if failed {
+		os.Exit(1)
+	}
+}
+
+// cleanResult is one branch in the output of `deadwood clean --json`.
+type cleanResult struct {
+	Name          string `json:"name"`
+	SHA           string `json:"sha"`
+	State         string `json:"state"`
+	Upstream      string `json:"upstream,omitempty"`
+	Deleted       bool   `json:"deleted"`
+	RemoteDeleted bool   `json:"remote_deleted"`
+	Error         string `json:"error,omitempty"`
+}
+
+// cleanOne deletes a branch. A branch whose remote deletion failed is still
+// reported as deleted, with the error alongside.
+func cleanOne(b git.Branch, remote bool) cleanResult {
+	r := cleanResult{Name: b.Name, SHA: b.SHA, State: stateLabel(b), Upstream: b.Upstream}
+	remoteDeleted, err := git.DeleteBranch(b, remote)
+	if err != nil {
+		r.Error = err.Error()
+	}
+	r.Deleted = err == nil || !git.BranchExists(b.Name)
+	r.RemoteDeleted = remoteDeleted
+	return r
+}
+
+func cleanJSON(base string, targets []git.Branch, yes, remote bool) {
+	out := struct {
+		Base     string        `json:"base"`
+		DryRun   bool          `json:"dry_run"`
+		Branches []cleanResult `json:"branches"`
+	}{Base: base, DryRun: !yes, Branches: []cleanResult{}}
+	failed := false
+	for _, b := range targets {
+		r := cleanResult{Name: b.Name, SHA: b.SHA, State: stateLabel(b), Upstream: b.Upstream}
+		if yes {
+			r = cleanOne(b, remote)
+			failed = failed || r.Error != ""
+		}
+		out.Branches = append(out.Branches, r)
+	}
+	enc := json.NewEncoder(os.Stdout)
+	enc.SetIndent("", "  ")
+	enc.Encode(out)
+	if failed {
 		os.Exit(1)
 	}
 }
@@ -235,9 +290,17 @@ func printList(opts git.Options, asJSON bool) error {
 		}{opts.Base, branches, worktrees})
 	}
 	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-	fmt.Fprintln(w, "BRANCH\tSTATE\tSYNC\tUPDATED\tUPSTREAM")
+	ciHeader := ""
+	if opts.CI {
+		ciHeader = "CI\t"
+	}
+	fmt.Fprintln(w, "BRANCH\tSTATE\tSYNC\t"+ciHeader+"UPDATED\tUPSTREAM")
 	for _, b := range branches {
-		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\n", b.Name, dash(stateLabel(b)), syncLabel(b), b.Age, dash(b.Upstream))
+		ci := ""
+		if opts.CI {
+			ci = dash(b.CI) + "\t"
+		}
+		fmt.Fprintf(w, "%s\t%s\t%s\t%s%s\t%s\n", b.Name, dash(stateLabel(b)), syncLabel(b), ci, b.Age, dash(b.Upstream))
 	}
 	return w.Flush()
 }

@@ -39,6 +39,7 @@ type Branch struct {
 	Merge     MergeKind `json:"merged,omitempty"`
 	Stale     bool      `json:"stale"`
 	Protected bool      `json:"protected"`
+	CI        string    `json:"ci,omitempty"` // pass, fail or running; empty when unknown
 }
 
 // Options control how branches are classified
@@ -50,6 +51,9 @@ type Options struct {
 	// PullRequests also asks the GitHub CLI which branches were merged
 	// through a pull request. It needs gh and the network, so it is opt-in.
 	PullRequests bool
+
+	// CI also asks the GitHub CLI for the workflow result of each branch tip.
+	CI bool
 }
 
 const DefaultStaleDays = 90
@@ -70,6 +74,7 @@ func LoadOptions(base string, staleDays int) (Options, error) {
 		opts.StaleDays = staleDays
 	}
 	opts.PullRequests = config("deadwood.pullRequests") == "true"
+	opts.CI = config("deadwood.ci") == "true"
 	if out, err := run("", "config", "--get-all", "deadwood.protect"); err == nil {
 		opts.Protect = strings.Fields(out)
 	}
@@ -175,6 +180,9 @@ func ListBranches(opts Options) ([]Branch, error) {
 	}
 	if opts.PullRequests {
 		applyPullRequests(branches)
+	}
+	if opts.CI {
+		applyCI(branches)
 	}
 	return branches, nil
 }

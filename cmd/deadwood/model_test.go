@@ -504,3 +504,42 @@ func TestThemes(t *testing.T) {
 		t.Error("an unknown theme should be reported")
 	}
 }
+
+func TestCIColumnIsOptIn(t *testing.T) {
+	m := testModel(t, 120, 24)
+	if strings.Contains(m.View(), "CI") {
+		t.Error("the CI column must stay hidden unless enabled")
+	}
+	m.opts.CI = true
+	branches := append([]git.Branch{}, m.branches...)
+	for i := range branches {
+		if branches[i].Name == "hotfix" {
+			branches[i].CI = git.CIFail
+		}
+	}
+	m = send(m, loadedMsg{branches: branches, worktrees: m.worktrees})
+	if view := m.View(); !strings.Contains(view, "CI") || !strings.Contains(view, "fail") {
+		t.Errorf("CI column missing:\n%s", view)
+	}
+	m = send(m, key("tab"))
+	if view := m.View(); !strings.Contains(view, "fail") {
+		t.Errorf("worktrees should show the CI result of their branch:\n%s", view)
+	}
+	for _, size := range [][2]int{{140, 30}, {80, 20}, {50, 12}} {
+		m = send(m, tea.WindowSizeMsg{Width: size[0], Height: size[1]})
+		for _, line := range strings.Split(m.View(), "\n") {
+			if w := lipgloss.Width(line); w > size[0] {
+				t.Errorf("%dx%d: line width %d overflows", size[0], size[1], w)
+			}
+		}
+	}
+}
+
+func TestFocusAfterCreate(t *testing.T) {
+	m := testModel(t, 100, 24)
+	m = send(m, opDoneMsg{status: "Created", focus: "old-spike"})
+	m = send(m, loadedMsg{branches: m.branches, worktrees: m.worktrees})
+	if b, _ := m.cursorBranch(); b.Name != "old-spike" || m.focus != "" {
+		t.Errorf("cursor on %q, focus %q", b.Name, m.focus)
+	}
+}

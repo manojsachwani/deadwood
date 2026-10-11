@@ -82,7 +82,7 @@ Press `?` in the app for this list.
 | `a` | Archive the selection: tag each as `archive/<name>`, then delete it |
 | `u` | Undo the last delete or archive |
 | `r` | Rename, optionally on the remote too |
-| `n` | New branch from the one under the cursor |
+| `n` | New branch from the one under the cursor; the cursor moves to it, so `s` switches to it |
 | `s` | Switch to the branch |
 | `p` / `P` | Push / pull (fast-forward only) |
 | `w` | Create a worktree for the branch |
@@ -120,6 +120,7 @@ Press `?` in the app for this list.
 | --- | --- |
 | State | `current` · `worktree` (checked out in a worktree) · `protected` · `merged` · `squashed` · `rebased` · `pr-merged` · `stale` |
 | Sync | `synced` · `↑2 ↓1` (ahead / behind the upstream) · `gone` (the upstream branch was deleted) · `local` (no upstream) |
+| CI | `pass` · `fail` · `running` · empty when the commit has no workflow runs. Only shown with `--ci` |
 
 `merged`, `squashed` and `rebased` are relative to the **base branch** shown in the header: the remote's default branch when there is one, otherwise `main` or `master`. Columns disappear as the window narrows; branch, state and sync stay longest.
 
@@ -179,6 +180,7 @@ deadwood clean [flags]           delete merged branches without the UI
   --base <ref>        compare branches against this ref
   --stale-days <n>    mark branches without commits for n days as stale (default 90, 0 disables)
   --prs               also count a branch as merged when gh reports its pull request merged
+  --ci                show the CI result of each branch tip, from gh
   --list              print the branches and their state, then exit
   --json              like --list, as JSON including worktrees
   --version           print the version
@@ -199,13 +201,18 @@ deadwood clean                    # dry run
 deadwood clean --yes              # delete locally
 deadwood clean --yes --remote     # also delete their upstream branches
 deadwood clean --yes --stale      # also delete stale branches, merged or not
+deadwood clean --json             # the same report as JSON, with or without --yes
 ```
 
-Each deletion prints the `git branch <name> <sha>` command that restores it. The exit status is non-zero when a branch could not be deleted.
+Each deletion prints the `git branch <name> <sha>` command that restores it. With `--json` the output is one object with `base`, `dry_run` and a `branches` list giving each branch's `name`, `sha`, `state`, `deleted`, `remote_deleted` and any `error`. The exit status is non-zero when a branch could not be deleted.
 
 ### Pull requests as a merge signal
 
 A squash merge whose conflicts were resolved by hand cannot be recognised by comparing patches. With `--prs`, or `git config deadwood.pullRequests true`, deadwood also asks the [GitHub CLI](https://cli.github.com) which pull requests were merged. A branch is marked `pr-merged` only when its tip is exactly the commit the pull request was merged at, so later commits are never mistaken for merged work. This needs `gh` installed and logged in, and makes loading slower.
+
+### CI status
+
+With `--ci`, or `git config deadwood.ci true`, a CI column shows the combined result of the GitHub Actions workflows that ran on each branch's tip commit: `fail` if any workflow failed, `running` if any is still going, `pass` if all succeeded. Worktrees show the result of their branch. A branch with commits you have not pushed has no result, because nothing ran on that commit. Like `--prs`, this needs `gh` installed and logged in, and makes loading slower.
 
 ## Configuration
 
@@ -215,6 +222,7 @@ Everything is optional and lives in git config, per repository or `--global`:
 git config deadwood.base origin/develop        # default for --base
 git config deadwood.staleDays 30               # default for --stale-days
 git config deadwood.pullRequests true          # default for --prs
+git config deadwood.ci true                    # default for --ci
 git config --add deadwood.protect 'release/*'  # never delete these; repeat for more patterns
 git config deadwood.theme ocean                # default, ocean, ember or mono
 git config deadwood.keys.delete x              # remap a key
@@ -237,9 +245,11 @@ Other tools do parts of this well. This is how they looked in October 2026, goin
 | Rename and switch branches | yes | no | no | no | — |
 | Worktree management | yes | protects their branches | cleans up merged ones | no | yes |
 | Unattended cleanup (`--yes`) | yes | yes | yes | yes | — |
-| Pull request state | optional, as a merge signal | no | yes | no | yes, with CI status |
+| Pull request state | optional, as a merge signal | no | yes | no | yes |
+| CI status | optional | no | no | no | yes |
+| Archive branches as tags | yes | no | no | no | — |
 
-If you want pull request and CI status next to each worktree, lazyworktree is the better pick today. Deadwood's bet is one interactive screen for both branches and worktrees, with deletes you can take back.
+lazyworktree goes further on the worktree side, with pull request details, tmux sessions and per-worktree notes. Deadwood's bet is one interactive screen for both branches and worktrees, with deletes you can take back.
 
 ## Limits
 

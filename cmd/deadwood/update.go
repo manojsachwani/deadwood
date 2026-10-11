@@ -26,6 +26,14 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.branches = msg.branches
 		m.worktrees = msg.worktrees
 		m.refreshTables()
+		if m.focus != "" {
+			for i, b := range m.visible {
+				if b.Name == m.focus {
+					m.branchTable.SetCursor(i)
+				}
+			}
+			m.focus = ""
+		}
 		return m, nil
 
 	case opDoneMsg:
@@ -42,6 +50,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.undo = nil
 		}
 		m.selected = make(map[string]struct{})
+		m.focus = msg.focus
 		m.busy = "Refreshing"
 		return m, tea.Batch(m.setStatus(kind, msg.status), m.loadCmd())
 
@@ -479,7 +488,7 @@ func (m model) submitInput() (tea.Model, tea.Cmd) {
 			if err := git.RenameBranch(old, value); err != nil {
 				return opDoneMsg{status: "Rename failed: " + err.Error(), failed: true}
 			}
-			return opDoneMsg{status: fmt.Sprintf("Renamed %s → %s", old, value)}
+			return opDoneMsg{status: fmt.Sprintf("Renamed %s → %s", old, value), focus: value}
 		})
 
 	case modeNewBranch:
@@ -488,7 +497,7 @@ func (m model) submitInput() (tea.Model, tea.Cmd) {
 			if err := git.CreateBranch(value, start); err != nil {
 				return opDoneMsg{status: "Create failed: " + err.Error(), failed: true}
 			}
-			return opDoneMsg{status: fmt.Sprintf("Created %s from %s", value, start)}
+			return opDoneMsg{status: fmt.Sprintf("Created %s from %s · %s switches to it", value, start, m.k("s")), focus: value}
 		})
 
 	case modeWorktreeBranch:
@@ -551,14 +560,14 @@ func (m model) updateConfirm(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				if err := git.RenameBranch(b.Name, name); err != nil {
 					return opDoneMsg{status: "Rename failed: " + err.Error(), failed: true}
 				}
-				return opDoneMsg{status: fmt.Sprintf("Renamed %s → %s", b.Name, name)}
+				return opDoneMsg{status: fmt.Sprintf("Renamed %s → %s", b.Name, name), focus: name}
 			})
 		case "r":
 			return m, m.run("Renaming", func() opDoneMsg {
 				if err := git.RenameBranchRemote(b, name); err != nil {
 					return opDoneMsg{status: "Rename: " + err.Error(), failed: true}
 				}
-				return opDoneMsg{status: fmt.Sprintf("Renamed %s → %s locally and on %s", b.Name, name, b.Remote)}
+				return opDoneMsg{status: fmt.Sprintf("Renamed %s → %s locally and on %s", b.Name, name, b.Remote), focus: name}
 			})
 		}
 

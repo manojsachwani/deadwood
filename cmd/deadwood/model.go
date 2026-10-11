@@ -138,6 +138,7 @@ type model struct {
 	detailFor git.Branch
 	detail    *git.Detail // nil while loading
 
+	focus      string          // branch to move the cursor to once it is loaded
 	undo       []deletedBranch // the last delete, restorable with u
 	deleted    []deletedBranch // everything deleted and not restored this session
 	chosenPath string          // worktree picked with enter, printed on exit
@@ -160,7 +161,8 @@ type opDoneMsg struct {
 	status   string
 	failed   bool
 	deleted  []deletedBranch
-	restored bool // the undo batch was put back
+	restored bool   // the undo batch was put back
+	focus    string // branch to put the cursor on after the reload
 }
 
 type detailMsg struct {
@@ -407,6 +409,7 @@ type colSpec struct {
 	width    int
 	flex     int
 	minTotal int
+	ci       bool // only shown when CI status is enabled
 }
 
 var branchCols = []colSpec{
@@ -414,6 +417,7 @@ var branchCols = []colSpec{
 	{title: "Branch", width: 16, flex: 3},
 	{title: "State", width: 9},
 	{title: "Sync", width: 8, minTotal: 48},
+	{title: "CI", width: 7, minTotal: 60, ci: true},
 	{title: "Upstream", width: 16, flex: 2, minTotal: 100},
 	{title: "Commit", width: 7, minTotal: 64},
 	{title: "Updated", width: 10, minTotal: 80},
@@ -425,6 +429,7 @@ var worktreeCols = []colSpec{
 	{title: "Path", width: 20, flex: 3},
 	{title: "Branch", width: 14, flex: 2},
 	{title: "Commit", width: 7, minTotal: 64},
+	{title: "CI", width: 7, minTotal: 60, ci: true},
 	{title: "State", width: 14, flex: 1},
 }
 
@@ -433,11 +438,11 @@ const (
 	minColWidth = 4
 )
 
-func layoutCols(specs []colSpec, total int) ([]table.Column, []bool) {
+func layoutCols(specs []colSpec, total int, showCI bool) ([]table.Column, []bool) {
 	visible := make([]bool, len(specs))
 	used, flex := 0, 0
 	for i, s := range specs {
-		if total < s.minTotal {
+		if total < s.minTotal || (s.ci && !showCI) {
 			continue
 		}
 		visible[i] = true
@@ -512,7 +517,7 @@ func (m model) branchRow(b git.Branch) []string {
 	if _, ok := m.selected[b.Name]; ok {
 		mark = "●"
 	}
-	return []string{mark, b.Name, stateLabel(b), syncLabel(b), b.Upstream, b.Commit, shortAge(time.Since(b.Updated)), b.Author, b.Subject}
+	return []string{mark, b.Name, stateLabel(b), syncLabel(b), b.CI, b.Upstream, b.Commit, shortAge(time.Since(b.Updated)), b.Author, b.Subject}
 }
 
 func (m model) worktreeRow(wt git.Worktree) []string {
@@ -539,7 +544,11 @@ func (m model) worktreeRow(wt git.Worktree) []string {
 	if wt.Detached {
 		branch = "(detached)"
 	}
-	return []string{m.inputPath(wt.Path), branch, wt.Commit, strings.Join(state, " · ")}
+	ci := ""
+	if b, ok := m.worktreeBranch(wt); ok {
+		ci = b.CI
+	}
+	return []string{m.inputPath(wt.Path), branch, wt.Commit, ci, strings.Join(state, " · ")}
 }
 
 // refreshTables rebuilds columns and rows of both tables for the current
@@ -549,14 +558,14 @@ func (m *model) refreshTables() {
 	total := m.width - appStyle.GetHorizontalFrameSize()
 	height := m.bodyHeight()
 
-	cols, visible := layoutCols(branchCols, total)
+	cols, visible := layoutCols(branchCols, total, m.opts.CI)
 	rows := make([]table.Row, len(m.visible))
 	for i, b := range m.visible {
 		rows[i] = pick(m.branchRow(b), visible)
 	}
 	setTable(&m.branchTable, cols, rows, total, height)
 
-	cols, visible = layoutCols(worktreeCols, total)
+	cols, visible = layoutCols(worktreeCols, total, m.opts.CI)
 	rows = make([]table.Row, len(m.worktrees))
 	for i, wt := range m.worktrees {
 		cells := m.worktreeRow(wt)
