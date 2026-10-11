@@ -28,3 +28,6 @@ require (
 	golang.org/x/sys v0.36.0 // indirect
 	golang.org/x/text v0.3.8 // indirect
 )
+
+// The v1.1.0 tag was moved after publication; use v1.1.1 or newer.
+retract v1.1.0
