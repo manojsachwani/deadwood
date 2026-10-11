@@ -437,3 +437,207 @@ func TestWorktreeLifecycle(t *testing.T) {
 		t.Errorf("got %d worktrees after prune, want 1", len(worktrees))
 	}
 }
+
+// withRemote adds a bare remote named origin next to the repository.
+func withRemote(t *testing.T, repo string) string {
+	t.Helper()
+	remote := filepath.Join(filepath.Dir(repo), "origin.git")
+	mustGit(t, "init", "-q", "--bare", remote)
+	mustGit(t, "remote", "add", "origin", remote)
+	return remote
+}
+
+func remoteHeads(t *testing.T, remote string) string {
+	t.Helper()
+	out, err := exec.Command("git", "ls-remote", "--heads", remote).Output()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(out)
+}
+
+func find(t *testing.T, name string) Branch {
+	t.Helper()
+	branches, err := ListBranches(Options{Base: "main"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, b := range branches {
+		if b.Name == name {
+			return b
+		}
+	}
+	t.Fatalf("branch %s not found", name)
+	return Branch{}
+}
+
+func TestCreatePushPull(t *testing.T) {
+	repo := initRepo(t)
+	remote := withRemote(t, repo)
+
+	if err := CreateBranch("topic", "main"); err != nil {
+		t.Fatal(err)
+	}
+	if err := CreateBranch("topic", "main"); err == nil {
+		t.Error("creating an existing branch should fail")
+	}
+	ref, err := PushBranch(find(t, "topic"))
+	if err != nil || ref != "origin/topic" {
+		t.Fatalf("ref = %q, err = %v", ref, err)
+	}
+	topic := find(t, "topic")
+	if topic.Upstream != "origin/topic" || !strings.Contains(remoteHeads(t, remote), "refs/heads/topic") {
+		t.Fatalf("push should publish and track: %+v", topic)
+	}
+
+	// Someone else pushes; pulling a branch that is not checked out fast-forwards it.
+	other := filepath.Join(filepath.Dir(repo), "other")
+	mustGit(t, "clone", "-q", remote, other, "-b", "topic")
+	mustGit(t, "-C", other, "-c", "user.name=T", "-c", "user.email=t@example.com", "commit", "-q", "--allow-empty", "-m", "theirs")
+	mustGit(t, "-C", other, "push", "-q", "origin", "topic")
+	if err := PullBranch(topic); err != nil {
+		t.Fatal(err)
+	}
+	if after := find(t, "topic"); after.SHA == topic.SHA || after.Subject != "theirs" {
+		t.Errorf("pull did not fast-forward: %+v", after)
+	}
+	if err := PullBranch(Branch{Name: "main"}); err == nil {
+		t.Error("pulling a branch without an upstream should fail")
+	}
+}
+
+func TestRenameBranchRemote(t *testing.T) {
+	repo := initRepo(t)
+	remote := withRemote(t, repo)
+	mustGit(t, "branch", "old-name")
+	if _, err := PushBranch(find(t, "old-name")); err != nil {
+		t.Fatal(err)
+	}
+	if err := RenameBranchRemote(find(t, "old-name"), "new-name"); err != nil {
+		t.Fatal(err)
+	}
+	heads := remoteHeads(t, remote)
+	if strings.Contains(heads, "old-name") || !strings.Contains(heads, "refs/heads/new-name") {
+		t.Errorf("remote heads after rename:\n%s", heads)
+	}
+	if b := find(t, "new-name"); b.Upstream != "origin/new-name" {
+		t.Errorf("renamed branch should track the new remote branch: %+v", b)
+	}
+	if err := RenameBranchRemote(find(t, "main"), "trunk"); err == nil {
+		t.Error("a branch without an upstream cannot be renamed remotely")
+	}
+}
+
+func TestArchiveBranch(t *testing.T) {
+	initRepo(t)
+	mustGit(t, "branch", "feature/x")
+	b := find(t, "feature/x")
+	if err := ArchiveBranch(b); err != nil {
+		t.Fatal(err)
+	}
+	out, _ := exec.Command("git", "rev-parse", "archive/feature/x").Output()
+	if BranchExists("feature/x") || strings.TrimSpace(string(out)) != b.SHA {
+		t.Errorf("archive should tag %s and delete the branch, tag = %s", b.SHA, out)
+	}
+	Unarchive(Branch{Name: "feature/x", SHA: "0000"})
+	if out, _ := exec.Command("git", "tag", "-l", "archive/*").Output(); len(out) == 0 {
+		t.Error("Unarchive must leave a tag that points elsewhere")
+	}
+	mustGit(t, "branch", "feature/x")
+	if err := ArchiveBranch(find(t, "feature/x")); err == nil || !BranchExists("feature/x") {
+		t.Errorf("an existing archive tag should stop the archive and keep the branch, err = %v", err)
+	}
+	Unarchive(b)
+	if out, _ := exec.Command("git", "tag", "-l", "archive/*").Output(); len(out) != 0 {
+		t.Errorf("Unarchive should remove the tag, still have %s", out)
+	}
+}
+
+func TestSavedViewAndConfigMap(t *testing.T) {
+	initRepo(t)
+	SaveView("newest", "feat")
+	if sort, filter := LoadView(); sort != "newest" || filter != "feat" {
+		t.Errorf("got %q, %q", sort, filter)
+	}
+	SaveView("", "")
+	if sort, filter := LoadView(); sort != "" || filter != "" {
+		t.Errorf("cleared view should be empty, got %q, %q", sort, filter)
+	}
+	mustGit(t, "config", "deadwood.keys.delete", "x")
+	mustGit(t, "config", "deadwood.keys.selectMerged", "m")
+	keys := ConfigMap("deadwood.keys")
+	if keys["delete"] != "x" || keys["selectmerged"] != "m" || len(keys) != 2 {
+		t.Errorf("keys = %v", keys)
+	}
+}
+
+func TestSetupWorktree(t *testing.T) {
+	repo := initRepo(t)
+	if err := os.WriteFile(filepath.Join(repo, ".env"), []byte("SECRET=1\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	mustGit(t, "config", "--add", "deadwood.worktreeCopy", ".env")
+	mustGit(t, "config", "--add", "deadwood.worktreeCopy", "missing.txt")
+	mustGit(t, "config", "--add", "deadwood.worktreeCopy", "../outside")
+	mustGit(t, "config", "deadwood.worktreeHook", "echo \"$DEADWOOD_MAIN_WORKTREE\" > hook.txt")
+
+	wt := filepath.Join(filepath.Dir(repo), "wt")
+	if err := AddWorktree(wt, "topic"); err != nil {
+		t.Fatal(err)
+	}
+	done, err := SetupWorktree(repo, wt)
+	if err != nil || len(done) != 2 {
+		t.Fatalf("done = %v, err = %v", done, err)
+	}
+	if data, _ := os.ReadFile(filepath.Join(wt, ".env")); string(data) != "SECRET=1\n" {
+		t.Errorf(".env not copied: %q", data)
+	}
+	if data, _ := os.ReadFile(filepath.Join(wt, "hook.txt")); strings.TrimSpace(string(data)) != repo {
+		t.Errorf("hook did not run in the worktree with the main path: %q", data)
+	}
+
+	mustGit(t, "config", "deadwood.worktreeHook", "echo broken >&2; exit 3")
+	if _, err := SetupWorktree(repo, wt); err == nil || !strings.Contains(err.Error(), "broken") {
+		t.Errorf("a failing hook should report its output, err = %v", err)
+	}
+}
+
+func TestPullRequestMergeSignal(t *testing.T) {
+	initRepo(t)
+	mustGit(t, "checkout", "-q", "-b", "handmerged")
+	commitFile(t, "a.txt", "one\n", "work")
+	mustGit(t, "checkout", "-q", "-b", "moved-on")
+	commitFile(t, "b.txt", "one\n", "more work")
+	mustGit(t, "checkout", "-q", "main")
+	merged := find(t, "handmerged")
+
+	// A stand-in for the GitHub CLI that reports one merged pull request
+	// per branch; moved-on has gained a commit since its PR was merged.
+	bin := t.TempDir()
+	script := "#!/bin/sh\necho '[{\"headRefName\":\"handmerged\",\"headRefOid\":\"" + merged.SHA +
+		"\"},{\"headRefName\":\"moved-on\",\"headRefOid\":\"" + merged.SHA + "\"}]'\n"
+	if err := os.WriteFile(filepath.Join(bin, "gh"), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	branches, err := ListBranches(Options{Base: "main", PullRequests: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, b := range branches {
+		switch b.Name {
+		case "handmerged":
+			if b.Merge != PRMerged {
+				t.Errorf("handmerged: merge = %q", b.Merge)
+			}
+		case "moved-on":
+			if b.Merge != NotMerged {
+				t.Errorf("moved-on has commits after its PR and must stay unmerged, got %q", b.Merge)
+			}
+		}
+	}
+	if b := find(t, "handmerged"); b.Merge != NotMerged {
+		t.Errorf("without the option gh must not be consulted, got %q", b.Merge)
+	}
+}

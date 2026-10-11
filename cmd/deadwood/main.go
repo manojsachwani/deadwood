@@ -20,33 +20,52 @@ var version = ""
 const usage = `deadwood - clear out git branches and worktrees
 
 Usage:
-  deadwood [flags]
+  deadwood [flags]                 open the interactive UI
+  deadwood clean [flags]           delete merged branches without the UI
 
-Run it inside a git repository to open the interactive UI.
+Run it inside a git repository.
 
 Flags:
   --base <ref>        compare branches against this ref
                       (default: the remote's default branch, then main/master)
   --stale-days <n>    mark branches without commits for n days as stale
                       (default 90, 0 disables)
+  --prs               also treat branches as merged when the GitHub CLI (gh)
+                      reports their pull request as merged
   --list              print the branches and their state, then exit
   --json              like --list, as JSON including worktrees
   --version           print the version
   -h, --help          show this help
 
+Clean flags (deadwood clean):
+  --yes               delete; without it the candidates are only listed
+  --stale             also delete stale branches, merged or not
+  --remote            delete their upstream branches too
+  --base, --stale-days, --prs as above
+
 Configuration (git config):
-  deadwood.base       default for --base
-  deadwood.staleDays  default for --stale-days
-  deadwood.protect    glob of branch names that are never deleted (repeatable)
+  deadwood.base           default for --base
+  deadwood.staleDays      default for --stale-days
+  deadwood.pullRequests   true to enable --prs by default
+  deadwood.protect        glob of branch names never deleted (repeatable)
+  deadwood.theme          default, ocean, ember or mono
+  deadwood.keys.<action>  remap a key, e.g. deadwood.keys.delete x
+  deadwood.worktreeCopy   file to copy into new worktrees (repeatable)
+  deadwood.worktreeHook   shell command to run in a new worktree
 
 Shell integration - jump into the worktree you pick with enter:
   dw() { local dir; dir="$(deadwood "$@")" && [ -d "$dir" ] && cd "$dir"; }
 `
 
 func main() {
+	if len(os.Args) > 1 && os.Args[1] == "clean" {
+		runClean(os.Args[2:])
+		return
+	}
 	var (
 		base        = flag.String("base", "", "")
 		staleDays   = flag.Int("stale-days", -1, "")
+		prs         = flag.Bool("prs", false, "")
 		list        = flag.Bool("list", false, "")
 		asJSON      = flag.Bool("json", false, "")
 		showVersion = flag.Bool("version", false, "")
@@ -67,6 +86,7 @@ func main() {
 	if err != nil {
 		fail(err)
 	}
+	opts.PullRequests = opts.PullRequests || *prs
 
 	if *list || *asJSON {
 		if err := printList(opts, *asJSON); err != nil {
@@ -83,11 +103,18 @@ func main() {
 		lipgloss.DefaultRenderer().SetOutput(termenv.NewOutput(os.Stderr))
 	}
 
-	final, err := tea.NewProgram(newModel(root, opts), programOpts...).Run()
+	if name := git.Config("deadwood.theme"); name != "" && !setTheme(name) {
+		fmt.Fprintf(os.Stderr, "deadwood: unknown theme %q, using default\n", name)
+	}
+	cfg := viewConfig{keys: git.ConfigMap("deadwood.keys")}
+	cfg.sort, cfg.filter = git.LoadView()
+
+	final, err := tea.NewProgram(newModel(root, opts, cfg), programOpts...).Run()
 	if err != nil {
 		fail(err)
 	}
 	m := final.(model)
+	git.SaveView(sortNames[m.sort], m.filter)
 	if len(m.deleted) > 0 {
 		fmt.Fprintln(os.Stderr, "Branches deleted in this session can be restored with:")
 		for _, d := range m.deleted {
@@ -96,6 +123,81 @@ func main() {
 	}
 	if m.chosenPath != "" {
 		fmt.Println(m.chosenPath)
+	}
+}
+
+// runClean is `deadwood clean`: the non-interactive counterpart of selecting
+// the merged branches and deleting them. It applies the same rules as the UI.
+func runClean(args []string) {
+	fs := flag.NewFlagSet("clean", flag.ExitOnError)
+	var (
+		base      = fs.String("base", "", "")
+		staleDays = fs.Int("stale-days", -1, "")
+		prs       = fs.Bool("prs", false, "")
+		yes       = fs.Bool("yes", false, "")
+		stale     = fs.Bool("stale", false, "")
+		remote    = fs.Bool("remote", false, "")
+	)
+	fs.Bool("merged", true, "") // accepted for readability; merged branches are always included
+	fs.Bool("dry-run", false, "")
+	fs.Usage = func() { fmt.Fprint(os.Stderr, usage) }
+	fs.Parse(args)
+
+	if _, err := git.RepoRoot(); err != nil {
+		fail(err)
+	}
+	opts, err := git.LoadOptions(*base, *staleDays)
+	if err != nil {
+		fail(err)
+	}
+	opts.PullRequests = opts.PullRequests || *prs
+	branches, err := git.ListBranches(opts)
+	if err != nil {
+		fail(err)
+	}
+
+	var targets []git.Branch
+	for _, b := range branches {
+		if ok, _ := deletable(b); ok && (b.Merge != git.NotMerged || (*stale && b.Stale)) {
+			targets = append(targets, b)
+		}
+	}
+	if len(targets) == 0 {
+		fmt.Println("Nothing to clean.")
+		return
+	}
+	if !*yes {
+		where := ""
+		if *remote {
+			where = " locally and on the remote"
+		}
+		fmt.Printf("Would delete %s%s (run again with --yes):\n", plural(len(targets), "branch"), where)
+		for _, b := range targets {
+			fmt.Printf("  %s  (%s, %s)\n", b.Name, stateLabel(b), b.Age)
+		}
+		return
+	}
+
+	failed := 0
+	for _, b := range targets {
+		remoteDeleted, err := git.DeleteBranch(b, *remote)
+		switch {
+		case err != nil && git.BranchExists(b.Name):
+			failed++
+			fmt.Fprintf(os.Stderr, "deadwood: %s: %v\n", b.Name, err)
+			continue
+		case err != nil:
+			failed++
+			fmt.Fprintf(os.Stderr, "deadwood: %s: %v\n", b.Name, err)
+		}
+		suffix := ""
+		if remoteDeleted {
+			suffix = " and " + b.Upstream
+		}
+		fmt.Printf("Deleted %s%s. Restore with: git branch %s %s\n", b.Name, suffix, b.Name, b.SHA)
+	}
+	if failed > 0 {
+		os.Exit(1)
 	}
 }
 

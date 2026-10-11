@@ -1,6 +1,9 @@
 package git
 
 import (
+	"fmt"
+	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 )
@@ -135,4 +138,46 @@ func SetWorktreeLocked(path string, locked bool) error {
 func DefaultWorktreePath(mainRoot, branch string) string {
 	slug := strings.NewReplacer("/", "-", "\\", "-", " ", "-").Replace(branch)
 	return filepath.Join(filepath.Dir(mainRoot), filepath.Base(mainRoot)+"-"+slug)
+}
+
+// SetupWorktree prepares a freshly created worktree according to git config:
+// every `deadwood.worktreeCopy` path is copied over from the main worktree
+// (untracked files such as .env), then `deadwood.worktreeHook` runs in the
+// new worktree through sh. It returns what it did, for display.
+func SetupWorktree(mainRoot, path string) (done []string, err error) {
+	if out, cfgErr := run("", "config", "--get-all", "deadwood.worktreeCopy"); cfgErr == nil {
+		for _, rel := range strings.Split(strings.TrimSpace(out), "\n") {
+			rel = strings.TrimSpace(rel)
+			if rel == "" || filepath.IsAbs(rel) || strings.HasPrefix(filepath.Clean(rel), "..") {
+				continue
+			}
+			src, dst := filepath.Join(mainRoot, rel), filepath.Join(path, rel)
+			data, readErr := os.ReadFile(src)
+			if readErr != nil {
+				continue // nothing to copy is not an error
+			}
+			info, _ := os.Stat(src)
+			if mkErr := os.MkdirAll(filepath.Dir(dst), 0o755); mkErr != nil {
+				return done, mkErr
+			}
+			if writeErr := os.WriteFile(dst, data, info.Mode().Perm()); writeErr != nil {
+				return done, writeErr
+			}
+			done = append(done, "copied "+rel)
+		}
+	}
+	if hook := config("deadwood.worktreeHook"); hook != "" {
+		cmd := exec.Command("sh", "-c", hook)
+		cmd.Dir = path
+		cmd.Env = append(os.Environ(), "DEADWOOD_MAIN_WORKTREE="+mainRoot, "DEADWOOD_WORKTREE="+path)
+		if out, hookErr := cmd.CombinedOutput(); hookErr != nil {
+			msg := cleanStderr(string(out))
+			if msg == "" {
+				msg = hookErr.Error()
+			}
+			return done, fmt.Errorf("worktree hook failed: %s", msg)
+		}
+		done = append(done, "ran hook")
+	}
+	return done, nil
 }

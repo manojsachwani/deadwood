@@ -19,7 +19,7 @@ Deadwood force-deletes branches, so try changes in a scratch repository, not one
 ## Pull requests
 
 - Keep a change focused, and add or update a test for it.
-- New keys go in three places: the handler in `update.go`, the hint line and the `?` overlay in `view.go`, and the key table in the README.
+- New keys go in four places: the handler in `update.go`, `keyAction` in `model.go` (so the key can be remapped), the hint line and the `?` overlay in `view.go`, and the key table in the README.
 
 ## Releasing
 

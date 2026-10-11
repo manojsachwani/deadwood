@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"path/filepath"
 	"strings"
 
 	"github.com/charmbracelet/bubbles/spinner"
@@ -113,7 +114,8 @@ func (m *model) forgetDeleted(restored []deletedBranch) {
 }
 
 func (m model) updateList(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	switch msg.String() {
+	key := m.canonical(msg.String())
+	switch key {
 	case "q":
 		return m, tea.Quit
 	case "?":
@@ -141,14 +143,17 @@ func (m model) updateList(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return opDoneMsg{status: "Fetched and pruned remotes"}
 		})
 	}
-	if m.view == viewWorktrees {
-		return m.updateWorktreeList(msg)
+	if key == "" {
+		return m, nil
 	}
-	return m.updateBranchList(msg)
+	if m.view == viewWorktrees {
+		return m.updateWorktreeList(msg, key)
+	}
+	return m.updateBranchList(msg, key)
 }
 
-func (m model) updateBranchList(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	switch msg.String() {
+func (m model) updateBranchList(msg tea.KeyMsg, key string) (tea.Model, tea.Cmd) {
+	switch key {
 	case " ":
 		b, ok := m.cursorBranch()
 		if !ok {
@@ -268,6 +273,68 @@ func (m model) updateBranchList(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return detailMsg{name: b.Name, detail: d, err: err}
 		})
 
+	case "A":
+		b, ok := m.cursorBranch()
+		if !ok {
+			return m, nil
+		}
+		n := m.selectWhere(func(o git.Branch) bool { return o.Author == b.Author })
+		m.refreshTables()
+		if n == 0 {
+			return m, m.setStatus(statusInfo, "No deletable branches by "+b.Author)
+		}
+		return m, m.setStatus(statusInfo, fmt.Sprintf("Selected %s by %s", plural(n, "branch"), b.Author))
+
+	case "a":
+		m.targets = m.actionBranches()
+		if len(m.targets) == 0 {
+			return m, nil
+		}
+		if len(m.targets) == 1 {
+			if ok, reason := deletable(m.targets[0]); !ok {
+				return m, m.setStatus(statusError, fmt.Sprintf("%s cannot be archived: %s", m.targets[0].Name, reason))
+			}
+		}
+		m.mode = modeArchiveConfirm
+		m.status = ""
+		return m, nil
+
+	case "n":
+		b, ok := m.cursorBranch()
+		if !ok {
+			return m, nil
+		}
+		m.targets = []git.Branch{b}
+		return m, m.startInput(modeNewBranch, "new branch name", "")
+
+	case "p":
+		b, ok := m.cursorBranch()
+		if !ok {
+			return m, nil
+		}
+		return m, m.run("Pushing", func() opDoneMsg {
+			ref, err := git.PushBranch(b)
+			if err != nil {
+				return opDoneMsg{status: "Push failed: " + err.Error(), failed: true}
+			}
+			return opDoneMsg{status: fmt.Sprintf("Pushed %s to %s", b.Name, ref)}
+		})
+
+	case "P":
+		b, ok := m.cursorBranch()
+		if !ok {
+			return m, nil
+		}
+		if b.Worktree != "" && !b.Current {
+			return m, m.setStatus(statusError, b.Name+" is checked out at "+m.showPath(b.Worktree)+"; pull it there")
+		}
+		return m, m.run("Pulling", func() opDoneMsg {
+			if err := git.PullBranch(b); err != nil {
+				return opDoneMsg{status: "Pull failed: " + err.Error(), failed: true}
+			}
+			return opDoneMsg{status: "Updated " + b.Name + " from " + b.Upstream}
+		})
+
 	case "w":
 		b, ok := m.cursorBranch()
 		if !ok {
@@ -285,8 +352,8 @@ func (m model) updateBranchList(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, cmd
 }
 
-func (m model) updateWorktreeList(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	switch msg.String() {
+func (m model) updateWorktreeList(msg tea.KeyMsg, key string) (tea.Model, tea.Cmd) {
+	switch key {
 	case "n":
 		return m, m.startInput(modeWorktreeBranch, "existing or new branch name", "")
 
@@ -317,6 +384,14 @@ func (m model) updateWorktreeList(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		m.wtTarget = wt
 		m.mode = modeWorktreeRemove
+		m.status = ""
+		return m, nil
+
+	case "M":
+		if len(m.mergedWorktrees()) == 0 {
+			return m, m.setStatus(statusInfo, "No clean worktrees on merged branches")
+		}
+		m.mode = modeWorktreePruneMerged
 		m.status = ""
 		return m, nil
 
@@ -393,11 +468,27 @@ func (m model) submitInput() (tea.Model, tea.Cmd) {
 			m.cancel()
 			return m, nil
 		}
+		if b := m.targets[0]; b.Upstream != "" && !b.Gone {
+			m.newName = value
+			m.mode = modeRenameScope
+			m.status = ""
+			m.input.Blur()
+			return m, nil
+		}
 		return m, m.run("Renaming", func() opDoneMsg {
 			if err := git.RenameBranch(old, value); err != nil {
 				return opDoneMsg{status: "Rename failed: " + err.Error(), failed: true}
 			}
 			return opDoneMsg{status: fmt.Sprintf("Renamed %s → %s", old, value)}
+		})
+
+	case modeNewBranch:
+		start := m.targets[0].Name
+		return m, m.run("Creating branch", func() opDoneMsg {
+			if err := git.CreateBranch(value, start); err != nil {
+				return opDoneMsg{status: "Create failed: " + err.Error(), failed: true}
+			}
+			return opDoneMsg{status: fmt.Sprintf("Created %s from %s", value, start)}
 		})
 
 	case modeWorktreeBranch:
@@ -410,12 +501,25 @@ func (m model) submitInput() (tea.Model, tea.Cmd) {
 		return m, m.startInput(modeWorktreePath, "path", m.inputPath(git.DefaultWorktreePath(m.mainRoot(), value)))
 
 	case modeWorktreePath:
-		branch, path := m.wtBranch, expandPath(value)
+		branch, path, mainRoot := m.wtBranch, expandPath(value), m.mainRoot()
 		return m, m.run("Creating worktree", func() opDoneMsg {
 			if err := git.AddWorktree(path, branch); err != nil {
 				return opDoneMsg{status: "Worktree failed: " + err.Error(), failed: true}
 			}
-			return opDoneMsg{status: fmt.Sprintf("Created worktree for %s at %s", branch, m.showPath(path))}
+			done := opDoneMsg{status: fmt.Sprintf("Created worktree for %s at %s", branch, m.showPath(path))}
+			abs, err := filepath.Abs(path)
+			if err != nil {
+				return done
+			}
+			steps, err := git.SetupWorktree(mainRoot, abs)
+			if len(steps) > 0 {
+				done.status += " · " + strings.Join(steps, ", ")
+			}
+			if err != nil {
+				done.status += " · " + err.Error()
+				done.failed = true
+			}
+			return done
 		})
 	}
 	return m, nil
@@ -437,6 +541,43 @@ func (m model) updateConfirm(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		case "r":
 			m.remoteDelete = true
 			m.mode = modeDeleteConfirm
+		}
+
+	case modeRenameScope:
+		b, name := m.targets[0], m.newName
+		switch key {
+		case "l":
+			return m, m.run("Renaming", func() opDoneMsg {
+				if err := git.RenameBranch(b.Name, name); err != nil {
+					return opDoneMsg{status: "Rename failed: " + err.Error(), failed: true}
+				}
+				return opDoneMsg{status: fmt.Sprintf("Renamed %s → %s", b.Name, name)}
+			})
+		case "r":
+			return m, m.run("Renaming", func() opDoneMsg {
+				if err := git.RenameBranchRemote(b, name); err != nil {
+					return opDoneMsg{status: "Rename: " + err.Error(), failed: true}
+				}
+				return opDoneMsg{status: fmt.Sprintf("Renamed %s → %s locally and on %s", b.Name, name, b.Remote)}
+			})
+		}
+
+	case modeArchiveConfirm:
+		if key == "y" {
+			targets := m.targets
+			return m, m.run("Archiving", func() opDoneMsg { return archiveBranches(targets) })
+		}
+
+	case modeWorktreePruneMerged:
+		if key == "y" || key == "b" {
+			targets, withBranches := m.mergedWorktrees(), key == "b"
+			branches := make([]git.Branch, len(targets))
+			for i, wt := range targets {
+				branches[i], _ = m.worktreeBranch(wt)
+			}
+			return m, m.run("Removing worktrees", func() opDoneMsg {
+				return pruneMergedWorktrees(targets, branches, withBranches)
+			})
 		}
 
 	case modeDeleteConfirm:
@@ -521,6 +662,57 @@ func deleteBranches(targets []git.Branch, remote bool) opDoneMsg {
 	}
 }
 
+func archiveBranches(targets []git.Branch) opDoneMsg {
+	var deleted []deletedBranch
+	var failed []string
+	for _, b := range targets {
+		ok, reason := deletable(b)
+		if ok {
+			err := git.ArchiveBranch(b)
+			if err == nil {
+				deleted = append(deleted, deletedBranch{Branch: b, archived: true})
+				continue
+			}
+			reason = err.Error()
+		}
+		failed = append(failed, fmt.Sprintf("%s (%s)", b.Name, reason))
+	}
+	status := fmt.Sprintf("Archived %s under %s", plural(len(deleted), "branch"), git.ArchivePrefix)
+	if len(failed) == 0 {
+		return opDoneMsg{status: status + " · u to undo", deleted: deleted}
+	}
+	return opDoneMsg{status: status + " · not done: " + strings.Join(failed, ", "), failed: true, deleted: deleted}
+}
+
+func pruneMergedWorktrees(targets []git.Worktree, branches []git.Branch, withBranches bool) opDoneMsg {
+	removed := 0
+	var deleted []deletedBranch
+	var failed []string
+	for i, wt := range targets {
+		if err := git.RemoveWorktree(wt, false); err != nil {
+			failed = append(failed, fmt.Sprintf("%s (%s)", wt.Branch, err))
+			continue
+		}
+		removed++
+		if !withBranches {
+			continue
+		}
+		if _, err := git.DeleteBranch(branches[i], false); err != nil {
+			failed = append(failed, fmt.Sprintf("branch %s (%s)", wt.Branch, err))
+			continue
+		}
+		deleted = append(deleted, deletedBranch{Branch: branches[i]})
+	}
+	status := "Removed " + plural(removed, "worktree")
+	if len(deleted) > 0 {
+		status += " and " + plural(len(deleted), "branch") + " · u to undo the branches"
+	}
+	if len(failed) > 0 {
+		return opDoneMsg{status: status + " · not done: " + strings.Join(failed, ", "), failed: true, deleted: deleted}
+	}
+	return opDoneMsg{status: status, deleted: deleted}
+}
+
 func restoreBranches(batch []deletedBranch) opDoneMsg {
 	var failed []string
 	remote := 0
@@ -528,6 +720,9 @@ func restoreBranches(batch []deletedBranch) opDoneMsg {
 		if err := git.RestoreBranch(d.Branch); err != nil {
 			failed = append(failed, fmt.Sprintf("%s (%s)", d.Name, err))
 			continue
+		}
+		if d.archived {
+			git.Unarchive(d.Branch)
 		}
 		if d.remote {
 			remote++

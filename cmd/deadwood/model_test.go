@@ -13,7 +13,7 @@ import (
 
 func testModel(t *testing.T, width, height int) model {
 	t.Helper()
-	m := newModel("/src/app", git.Options{Base: "origin/main", StaleDays: 90})
+	m := newModel("/src/app", git.Options{Base: "origin/main", StaleDays: 90}, viewConfig{})
 	m = send(m, tea.WindowSizeMsg{Width: width, Height: height})
 	return send(m, loadedMsg{
 		branches: []git.Branch{
@@ -136,7 +136,7 @@ func TestDeleteFlow(t *testing.T) {
 }
 
 func TestEmptyRepository(t *testing.T) {
-	m := newModel("/src/app", git.Options{Base: "origin/main", StaleDays: 90})
+	m := newModel("/src/app", git.Options{Base: "origin/main", StaleDays: 90}, viewConfig{})
 	m = send(m, tea.WindowSizeMsg{Width: 80, Height: 20})
 	m = send(m, loadedMsg{worktrees: []git.Worktree{{Path: "/src/app", Branch: "main", Main: true}}})
 	if !strings.Contains(m.View(), "No branches yet") {
@@ -151,7 +151,7 @@ func TestEmptyRepository(t *testing.T) {
 }
 
 func TestPaths(t *testing.T) {
-	m := newModel("/src/app", git.Options{Base: "origin/main", StaleDays: 90})
+	m := newModel("/src/app", git.Options{Base: "origin/main", StaleDays: 90}, viewConfig{})
 	far := "/var/folders/some/really/long/temporary/location/for/worktrees/app-feature"
 	if got := m.inputPath("/src/app-x"); got != "../app-x" {
 		t.Errorf("inputPath sibling = %q", got)
@@ -377,5 +377,130 @@ func TestShortAge(t *testing.T) {
 		if got := shortAge(d); got != want {
 			t.Errorf("shortAge(%v) = %q, want %q", d, got, want)
 		}
+	}
+}
+
+func TestKeyRemapping(t *testing.T) {
+	m := newModel("/src/app", git.Options{Base: "origin/main"}, viewConfig{
+		keys: map[string]string{"delete": "x", "select": "space", "bogus": "z", "quit": "q"},
+	})
+	m = send(m, tea.WindowSizeMsg{Width: 100, Height: 24})
+	m = send(m, loadedMsg{branches: []git.Branch{{Name: "topic"}}})
+	if m = send(m, key("d")); m.mode != modeList {
+		t.Error("the default key must stop working once it is remapped")
+	}
+	if m = send(m, key("x")); m.mode != modeDeleteScope {
+		t.Errorf("the custom key should delete, mode = %v", m.mode)
+	}
+	m = send(m, key("esc"))
+	if view := m.View(); !strings.Contains(view, "x delete") || strings.Contains(view, "d delete") {
+		t.Errorf("hints should show the custom key:\n%s", view)
+	}
+	if m.k(" ") != "space" || len(m.keyTo) != 1 {
+		t.Errorf("unknown actions and no-op remaps must be ignored: %v", m.keyTo)
+	}
+}
+
+func TestSavedViewIsApplied(t *testing.T) {
+	m := newModel("/src/app", git.Options{}, viewConfig{sort: "oldest", filter: "feat*"})
+	m = send(m, tea.WindowSizeMsg{Width: 100, Height: 24})
+	m = send(m, loadedMsg{branches: []git.Branch{
+		{Name: "feature/b", Updated: day(1)}, {Name: "feature/a", Updated: day(9)}, {Name: "fix/feat"},
+	}})
+	if m.sort != sortOldest || len(m.visible) != 2 || m.visible[0].Name != "feature/a" {
+		t.Errorf("sort = %v, visible = %+v", m.sort, m.visible)
+	}
+	if sortNames[m.sort] != "oldest" || parseSort("nonsense") != sortName {
+		t.Error("sort names should round-trip and unknown ones fall back to name")
+	}
+}
+
+func TestGlobFilter(t *testing.T) {
+	for _, c := range []struct {
+		filter, name string
+		want         bool
+	}{
+		{"", "anything", true},
+		{"LOG", "feature/login", true},
+		{"feature/*", "feature/login", true},
+		{"feature/*", "fix/feature", false},
+		{"*fix?", "hotfix1", true},
+	} {
+		if got := matchesFilter(c.filter, c.name); got != c.want {
+			t.Errorf("matchesFilter(%q, %q) = %v", c.filter, c.name, got)
+		}
+	}
+}
+
+func TestBranchPrompts(t *testing.T) {
+	m := testModel(t, 110, 24)
+	m = send(m, key("down"))
+
+	m = send(m, key("n"))
+	if m.mode != modeNewBranch || !strings.Contains(m.View(), "New branch from feature/login") {
+		t.Fatalf("mode = %v", m.mode)
+	}
+	m = send(m, key("esc"))
+
+	// feature/login tracks a live upstream, so a rename asks about the remote.
+	m = send(m, key("r"))
+	m.input.SetValue("feature/signin")
+	m = send(m, key("enter"))
+	if m.mode != modeRenameScope || m.newName != "feature/signin" || !strings.Contains(m.View(), "Also rename origin/feature/login?") {
+		t.Fatalf("mode = %v, newName = %q", m.mode, m.newName)
+	}
+	m = send(m, key("esc"))
+
+	m = send(m, key("a"))
+	if m.mode != modeArchiveConfirm || !strings.Contains(m.View(), "archive/<name>") {
+		t.Fatalf("mode = %v", m.mode)
+	}
+	m = send(m, key("n"))
+
+	m = send(m, key("A"))
+	if _, ok := m.selected["feature/login"]; !ok || len(m.selected) != 1 {
+		t.Errorf("A should select deletable branches by the same author, got %v", m.selected)
+	}
+}
+
+func TestPruneMergedWorktrees(t *testing.T) {
+	m := testModel(t, 110, 24)
+	m = send(m, key("tab"))
+	if m = send(m, key("M")); m.mode != modeList || !strings.Contains(m.status, "No clean worktrees") {
+		t.Fatalf("hotfix is dirty and unmerged: mode %v, status %q", m.mode, m.status)
+	}
+	branches := append([]git.Branch{}, m.branches...)
+	for i := range branches {
+		if branches[i].Name == "hotfix" {
+			branches[i].Merge = git.Squashed
+		}
+	}
+	worktrees := []git.Worktree{
+		{Path: "/src/app", Branch: "main", Main: true},
+		{Path: "/src/app-hotfix", Branch: "hotfix"},
+		{Path: "/src/app-locked", Branch: "hotfix", Locked: true},
+	}
+	m = send(m, loadedMsg{branches: branches, worktrees: worktrees})
+	if got := m.mergedWorktrees(); len(got) != 1 || got[0].Path != "/src/app-hotfix" {
+		t.Fatalf("merged worktrees = %+v", got)
+	}
+	if m = send(m, key("M")); m.mode != modeWorktreePruneMerged || !strings.Contains(m.View(), "Remove 1 clean worktree") {
+		t.Errorf("mode = %v", m.mode)
+	}
+}
+
+func TestThemes(t *testing.T) {
+	defer setTheme("default")
+	for name := range themes {
+		if !setTheme(name) {
+			t.Errorf("theme %s should be known", name)
+		}
+		m := testModel(t, 100, 24)
+		if h := lipgloss.Height(m.View()); h > 24 {
+			t.Errorf("theme %s: height %d", name, h)
+		}
+	}
+	if setTheme("nope") {
+		t.Error("an unknown theme should be reported")
 	}
 }

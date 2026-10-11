@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"time"
@@ -32,6 +33,10 @@ const (
 	modeDeleteScope
 	modeDeleteConfirm
 	modeRename
+	modeRenameScope
+	modeNewBranch
+	modeArchiveConfirm
+	modeWorktreePruneMerged
 	modeWorktreeBranch
 	modeWorktreePath
 	modeWorktreeRemove
@@ -41,7 +46,7 @@ const (
 // isInput reports whether the mode has the text input focused.
 func (md mode) isInput() bool {
 	switch md {
-	case modeFilter, modeRename, modeWorktreeBranch, modeWorktreePath:
+	case modeFilter, modeRename, modeNewBranch, modeWorktreeBranch, modeWorktreePath:
 		return true
 	}
 	return false
@@ -60,6 +65,28 @@ func (s sortMode) String() string {
 	return [...]string{"name", "newest first", "oldest first"}[s]
 }
 
+// sortNames are the values stored in git config between runs.
+var sortNames = [...]string{"", "newest", "oldest"}
+
+func parseSort(name string) sortMode {
+	for i, n := range sortNames {
+		if n == name {
+			return sortMode(i)
+		}
+	}
+	return sortName
+}
+
+// keyAction maps the action names used in `git config deadwood.keys.<action>`
+// to the key each has by default. Keys are shared between the tabs, so
+// remapping "delete" also moves "remove worktree".
+var keyAction = map[string]string{
+	"select": " ", "selectall": "ctrl+a", "selectmerged": "M", "selectstale": "S", "selectauthor": "A",
+	"delete": "d", "archive": "a", "undo": "u", "rename": "r", "switch": "s", "worktree": "w",
+	"new": "n", "push": "p", "pull": "P", "details": "enter", "filter": "/", "sort": "o",
+	"lock": "l", "fetch": "F", "refresh": "ctrl+r", "help": "?", "quit": "q",
+}
+
 type statusKind int
 
 const (
@@ -73,7 +100,8 @@ const statusTimeout = 6 * time.Second
 // deletedBranch is a branch deadwood removed, kept so it can be restored.
 type deletedBranch struct {
 	git.Branch
-	remote bool // its upstream branch was deleted too
+	remote   bool // its upstream branch was deleted too
+	archived bool // an archive tag was created for it
 }
 
 type model struct {
@@ -103,6 +131,7 @@ type model struct {
 	// Pending operation, filled in while a prompt is open.
 	targets      []git.Branch
 	remoteDelete bool
+	newName      string // rename target while asking about the remote
 	wtBranch     string
 	wtTarget     git.Worktree
 
@@ -112,6 +141,10 @@ type model struct {
 	undo       []deletedBranch // the last delete, restorable with u
 	deleted    []deletedBranch // everything deleted and not restored this session
 	chosenPath string          // worktree picked with enter, printed on exit
+
+	// Remapped keys: default key -> custom key, and the reverse.
+	keyTo   map[string]string
+	keyFrom map[string]string
 
 	width  int
 	height int
@@ -138,7 +171,14 @@ type detailMsg struct {
 
 type clearStatusMsg struct{ id int }
 
-func newModel(root string, opts git.Options) model {
+// viewConfig is what newModel takes from git config besides the options.
+type viewConfig struct {
+	sort   string
+	filter string
+	keys   map[string]string // action name -> custom key
+}
+
+func newModel(root string, opts git.Options, cfg viewConfig) model {
 	newTable := func() table.Model {
 		t := table.New(table.WithFocused(true))
 		t.SetStyles(tableStyles())
@@ -149,7 +189,22 @@ func newModel(root string, opts git.Options) model {
 	ti.CharLimit = 255
 	sp := spinner.New(spinner.WithSpinner(spinner.MiniDot))
 	sp.Style = promptStyle
+	keyTo, keyFrom := map[string]string{}, map[string]string{}
+	for action, custom := range cfg.keys {
+		def, ok := keyAction[strings.ToLower(action)]
+		if custom == "space" {
+			custom = " "
+		}
+		if !ok || custom == "" || custom == def {
+			continue
+		}
+		keyTo[def], keyFrom[custom] = custom, def
+	}
 	return model{
+		keyTo:         keyTo,
+		keyFrom:       keyFrom,
+		sort:          parseSort(cfg.sort),
+		filter:        cfg.filter,
 		root:          root,
 		opts:          opts,
 		branchTable:   newTable(),
@@ -175,6 +230,29 @@ func (m model) loadCmd() tea.Cmd {
 		worktrees, err := git.ListWorktrees()
 		return loadedMsg{branches: branches, worktrees: worktrees, err: err}
 	}
+}
+
+// canonical translates a pressed key into the default key the handlers
+// switch on. A default key that was remapped away does nothing.
+func (m model) canonical(pressed string) string {
+	if def, ok := m.keyFrom[pressed]; ok {
+		return def
+	}
+	if _, moved := m.keyTo[pressed]; moved {
+		return ""
+	}
+	return pressed
+}
+
+// k is the key to show in hints for an action's default key.
+func (m model) k(def string) string {
+	if custom, ok := m.keyTo[def]; ok {
+		def = custom
+	}
+	if def == " " {
+		return "space"
+	}
+	return def
 }
 
 // mainRoot is the main working tree, which new worktrees are placed next to.
@@ -257,10 +335,9 @@ func (m model) prunableCount() int {
 // applyView recomputes the visible branches from the filter and sort order,
 // and drops selections that are no longer visible.
 func (m *model) applyView() {
-	needle := strings.ToLower(m.filter)
 	m.visible = m.visible[:0:0]
 	for _, b := range m.branches {
-		if needle == "" || strings.Contains(strings.ToLower(b.Name), needle) {
+		if matchesFilter(m.filter, b.Name) {
 			m.visible = append(m.visible, b)
 		}
 	}
@@ -279,6 +356,36 @@ func (m *model) applyView() {
 			delete(m.selected, name)
 		}
 	}
+}
+
+// matchesFilter does a case-insensitive substring match, or a glob match
+// against the whole name when the filter contains * or ?. Unlike a path
+// glob, * also matches the slashes in branch names.
+func matchesFilter(filter, name string) bool {
+	filter, name = strings.ToLower(filter), strings.ToLower(name)
+	if !strings.ContainsAny(filter, "*?") {
+		return strings.Contains(name, filter)
+	}
+	pattern := regexp.QuoteMeta(filter)
+	pattern = strings.ReplaceAll(pattern, `\*`, ".*")
+	pattern = strings.ReplaceAll(pattern, `\?`, ".")
+	ok, err := regexp.MatchString("^"+pattern+"$", name)
+	return ok && err == nil
+}
+
+// mergedWorktrees are the worktrees that can go without losing anything:
+// clean, unlocked, not the main or current one, on a merged branch.
+func (m model) mergedWorktrees() []git.Worktree {
+	var out []git.Worktree
+	for _, wt := range m.worktrees {
+		if wt.Main || wt.Path == m.root || wt.Locked || wt.Dirty || wt.Prunable || wt.Bare {
+			continue
+		}
+		if b, ok := m.worktreeBranch(wt); ok && b.Merge != git.NotMerged {
+			out = append(out, wt)
+		}
+	}
+	return out
 }
 
 // selectWhere replaces the selection with the deletable visible branches

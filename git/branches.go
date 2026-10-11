@@ -46,6 +46,10 @@ type Options struct {
 	Base      string   // ref that branches are compared against
 	StaleDays int      // branches without commits for this long are stale; 0 disables
 	Protect   []string // glob patterns of branch names that are never deleted
+
+	// PullRequests also asks the GitHub CLI which branches were merged
+	// through a pull request. It needs gh and the network, so it is opt-in.
+	PullRequests bool
 }
 
 const DefaultStaleDays = 90
@@ -65,6 +69,7 @@ func LoadOptions(base string, staleDays int) (Options, error) {
 	if staleDays >= 0 {
 		opts.StaleDays = staleDays
 	}
+	opts.PullRequests = config("deadwood.pullRequests") == "true"
 	if out, err := run("", "config", "--get-all", "deadwood.protect"); err == nil {
 		opts.Protect = strings.Fields(out)
 	}
@@ -167,6 +172,9 @@ func ListBranches(opts Options) ([]Branch, error) {
 	}
 	if opts.Base != "" {
 		detectRewrittenMerges(opts.Base, branches)
+	}
+	if opts.PullRequests {
+		applyPullRequests(branches)
 	}
 	return branches, nil
 }
@@ -374,3 +382,158 @@ func BranchDetail(base, name string) (Detail, error) {
 	}
 	return d, nil
 }
+
+// CreateBranch creates a branch at start without checking it out
+func CreateBranch(name, start string) error {
+	_, err := run("", "branch", name, start)
+	return err
+}
+
+// defaultRemote is where a branch without an upstream gets pushed: origin
+// when it exists, otherwise the first remote.
+func defaultRemote() (string, error) {
+	out, err := run("", "remote")
+	if err != nil {
+		return "", err
+	}
+	remotes := strings.Fields(out)
+	if len(remotes) == 0 {
+		return "", errors.New("this repository has no remote")
+	}
+	for _, r := range remotes {
+		if r == "origin" {
+			return r, nil
+		}
+	}
+	return remotes[0], nil
+}
+
+// PushBranch pushes a branch to its upstream, or publishes it on the default
+// remote and starts tracking it when it has none. It returns the remote ref.
+func PushBranch(b Branch) (string, error) {
+	if b.Upstream != "" && b.Remote != "" {
+		remoteBranch := strings.TrimPrefix(b.Upstream, b.Remote+"/")
+		_, err := run("", "push", "--quiet", b.Remote, b.Name+":refs/heads/"+remoteBranch)
+		return b.Upstream, err
+	}
+	remote, err := defaultRemote()
+	if err != nil {
+		return "", err
+	}
+	_, err = run("", "push", "--quiet", "--set-upstream", remote, b.Name)
+	return remote + "/" + b.Name, err
+}
+
+// PullBranch fast-forwards a branch from its upstream. The current branch is
+// pulled in place; any other branch is updated without checking it out.
+func PullBranch(b Branch) error {
+	if b.Upstream == "" || b.Remote == "" {
+		return errors.New("branch has no upstream")
+	}
+	if b.Gone {
+		return errors.New("upstream branch is gone")
+	}
+	if b.Current {
+		_, err := run("", "pull", "--quiet", "--ff-only")
+		return err
+	}
+	remoteBranch := strings.TrimPrefix(b.Upstream, b.Remote+"/")
+	_, err := run("", "fetch", "--quiet", b.Remote, remoteBranch+":"+b.Name)
+	return err
+}
+
+// RenameBranchRemote renames a branch locally and on its remote: the new
+// name is pushed and tracked, then the old remote branch is deleted unless
+// it moved since the last fetch.
+func RenameBranchRemote(b Branch, newName string) error {
+	if b.Upstream == "" || b.Remote == "" || b.Gone {
+		return errors.New("branch has no upstream to rename")
+	}
+	oldRemoteBranch := strings.TrimPrefix(b.Upstream, b.Remote+"/")
+	lease := ""
+	if out, err := run("", "rev-parse", "--verify", "--quiet", "refs/remotes/"+b.Upstream); err == nil {
+		lease = "--force-with-lease=" + oldRemoteBranch + ":" + strings.TrimSpace(out)
+	}
+	if err := RenameBranch(b.Name, newName); err != nil {
+		return err
+	}
+	if _, err := run("", "push", "--quiet", "--set-upstream", b.Remote, newName+":refs/heads/"+newName); err != nil {
+		return fmt.Errorf("renamed locally, push failed: %w", err)
+	}
+	args := []string{"push", "--quiet"}
+	if lease != "" {
+		args = append(args, lease)
+	}
+	if _, err := run("", append(args, b.Remote, ":refs/heads/"+oldRemoteBranch)...); err != nil {
+		return fmt.Errorf("renamed and pushed, but the old remote branch remains: %w", err)
+	}
+	return nil
+}
+
+// ArchivePrefix is the tag namespace archived branches are kept under
+const ArchivePrefix = "archive/"
+
+// ArchiveBranch tags the branch tip as archive/<name> and deletes the local
+// branch, so its commits stay reachable.
+func ArchiveBranch(b Branch) error {
+	tag := ArchivePrefix + b.Name
+	if _, err := run("", "tag", tag, b.SHA); err != nil {
+		return err
+	}
+	if _, err := DeleteBranch(b, false); err != nil {
+		run("", "tag", "-d", tag)
+		return err
+	}
+	return nil
+}
+
+// Unarchive removes the archive tag of a branch, provided it still points at
+// the commit the branch was archived at.
+func Unarchive(b Branch) {
+	tag := ArchivePrefix + b.Name
+	if out, err := run("", "rev-parse", "--verify", "--quiet", "refs/tags/"+tag+"^{commit}"); err == nil && strings.TrimSpace(out) == b.SHA {
+		run("", "tag", "-d", tag)
+	}
+}
+
+// View settings remembered per repository in git config
+const (
+	configSort   = "deadwood.sort"
+	configFilter = "deadwood.filter"
+)
+
+// LoadView returns the sort order and filter saved by SaveView
+func LoadView() (sort, filter string) {
+	return config(configSort), config(configFilter)
+}
+
+// SaveView remembers the sort order and filter for the next run
+func SaveView(sort, filter string) {
+	for key, value := range map[string]string{configSort: sort, configFilter: filter} {
+		if value == "" {
+			run("", "config", "--local", "--unset-all", key)
+		} else {
+			run("", "config", "--local", key, value)
+		}
+	}
+}
+
+// ConfigMap returns every `git config <prefix>.<name>` as name -> value
+func ConfigMap(prefix string) map[string]string {
+	values := map[string]string{}
+	out, err := run("", "config", "--get-regexp", "^"+strings.ReplaceAll(prefix, ".", `\.`)+`\.`)
+	if err != nil {
+		return values
+	}
+	for _, line := range strings.Split(out, "\n") {
+		key, value, ok := strings.Cut(line, " ")
+		if !ok {
+			continue
+		}
+		values[strings.ToLower(key[len(prefix)+1:])] = strings.TrimSpace(value)
+	}
+	return values
+}
+
+// Config returns one git config value, or "" when it is unset
+func Config(key string) string { return config(key) }

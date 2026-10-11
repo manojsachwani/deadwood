@@ -5,20 +5,20 @@ A terminal UI for clearing out git branches and worktrees.
 Deadwood shows every local branch with what you need to decide its fate — is it merged (including squash and rebase merges), is its remote gone, how old is it, is a worktree holding it — and lets you delete in bulk, undo, rename, switch, and manage worktrees from the same screen. One binary, no configuration, no GitHub token.
 
 ```
- deadwood  my-project  ·  base origin/main                              Branches 9   Worktrees 2
+ deadwood  my-project  ·  base origin/main                                    Branches 8   Worktrees 2
 
-     Branch                    State      Sync      Upstream               Commit   Updated
- ──────────────────────────────────────────────────────────────────────────────────────────────
-     chore/old-experiment      stale      local                            ab14a3b  1y 9mo ago
-  ●  fix/typo                  merged     synced    origin/fix/typo        825a394  3w ago
-  ●  feature/export            squashed   gone      origin/feature/export  29f3319  5d ago
-     feature/login                        ↑1        origin/feature/login   6f67d42  2h ago
-     feature/payments          worktree   ↑3 ↓1     origin/feature/paym…   1bc1a93  16m ago
-     main                      current    synced    origin/main            6307dfe  just now
-  ●  refactor/parser           rebased    local                            2a183cc  2d ago
-     release/1.0               protected  local                            6307dfe  4mo ago
+     Branch                        State      Sync      Upstream                  Commit   Updated
+ ─────────────────────────────────────────────────────────────────────────────────────────────────────
+     chore/old-experiment          stale      local                               31f9797  1y 9mo ago
+  ●  feature/export                squashed   gone      origin/feature/export     dd6d3c6  5d ago
+     feature/login                            ↑1        origin/feature/login      29b5446  6h ago
+     feature/payments              worktree   synced    origin/feature/payments   20c56e2  1d ago
+  ●  fix/typo                      merged     synced    origin/fix/typo           04f8a96  3w ago
+     main                          current    synced    origin/main               878f78f  just now
+  ●  refactor/parser               rebased    local                               bf881da  3d ago
+     release/1.0                   protected  local                               04f8a96  3w ago
 
- 3 selected  ·  2 of 9
+ Selected 3 merged branches
  space select  ·  d delete  ·  M select merged  ·  / filter  ·  ? all keys  ·  q quit  ·  u undo
 ```
 
@@ -75,13 +75,17 @@ Press `?` in the app for this list.
 | `ctrl+a` | Select all / none |
 | `M` | Select every merged, squashed or rebased branch |
 | `S` | Select every stale branch |
+| `A` | Select every branch by the author of the one under the cursor |
 | `d` | Delete the selection, locally or locally + remote |
-| `u` | Undo the last delete |
-| `r` | Rename |
+| `a` | Archive the selection: tag each as `archive/<name>`, then delete it |
+| `u` | Undo the last delete or archive |
+| `r` | Rename, optionally on the remote too |
+| `n` | New branch from the one under the cursor |
 | `s` | Switch to the branch |
+| `p` / `P` | Push / pull (fast-forward only) |
 | `w` | Create a worktree for the branch |
 | `enter` | Show the commits that are not in the base branch |
-| `/` | Filter by name |
+| `/` | Filter by name; `*` and `?` work as wildcards |
 | `o` | Cycle sort order: name, newest, oldest |
 
 **Worktrees**
@@ -90,6 +94,7 @@ Press `?` in the app for this list.
 | --- | --- |
 | `n` | New worktree, for an existing or a new branch |
 | `d` | Remove the worktree, optionally with its branch |
+| `M` | Remove every clean worktree whose branch is merged |
 | `enter` | Quit and print the worktree's path (see [shell integration](#jump-into-a-worktree)) |
 | `l` | Lock / unlock |
 | `p` | Prune entries whose directory is gone |
@@ -105,13 +110,13 @@ Press `?` in the app for this list.
 | `?` | Show all keys |
 | `q` | Quit |
 
-`d`, `r` and `enter` act on the branch under the cursor when nothing is selected.
+`d`, `a`, `r` and `enter` act on the branch under the cursor when nothing is selected. The sort order and filter are remembered per repository.
 
 ### Reading the table
 
 | Column | Values |
 | --- | --- |
-| State | `current` · `worktree` (checked out in a worktree) · `protected` · `merged` · `squashed` · `rebased` · `stale` |
+| State | `current` · `worktree` (checked out in a worktree) · `protected` · `merged` · `squashed` · `rebased` · `pr-merged` · `stale` |
 | Sync | `synced` · `↑2 ↓1` (ahead / behind the upstream) · `gone` (the upstream branch was deleted) · `local` (no upstream) |
 
 `merged`, `squashed` and `rebased` are relative to the **base branch** shown in the header: the remote's default branch when there is one, otherwise `main` or `master`. Columns disappear as the window narrows; branch, state and sync stay longest.
@@ -129,11 +134,31 @@ What happens then:
 - Remote deletion targets the branch's own upstream, whatever the remote is called, and uses `--force-with-lease`. Branches without an upstream, or whose upstream is already gone, are only deleted locally.
 - `u` brings the last batch back locally and re-attaches the upstream if it still exists. A deleted remote branch is **not** restored; push the branch to recreate it.
 
+### Renaming, pushing and pulling
+
+- `r` renames locally. If the branch tracks a remote branch you are asked whether to rename that too: the new name is pushed and tracked, then the old remote branch is deleted (with a lease).
+- `p` pushes to the branch's upstream. A branch without one is published on `origin` (or the only remote) and starts tracking it.
+- `P` fast-forwards from the upstream, also for a branch that is not checked out. It never merges or rebases.
+
+### Archiving
+
+`a` keeps a branch's commits reachable without keeping the branch: it creates the tag `archive/<name>` at the branch tip and deletes the local branch. Bring one back with `git branch <name> archive/<name>`. `u` undoes the archive and removes the tag again.
+
 ### Worktrees
 
 - New worktrees default to a sibling of the main checkout, e.g. `../my-project-feature-login`. A branch name that does not exist yet is created from `HEAD`.
 - Removing a worktree with uncommitted changes, or a locked one, warns first and then forces the removal. Press `b` instead of `y` to delete its branch in the same step.
+- `M` removes, in one step, every worktree that is clean, unlocked and on a merged branch.
 - The main worktree, and the one deadwood is running in, cannot be removed.
+
+To prepare new worktrees automatically, tell deadwood what to copy and run:
+
+```sh
+git config --add deadwood.worktreeCopy .env             # copied from the main worktree; repeat for more files
+git config deadwood.worktreeHook 'npm install'          # runs in the new worktree
+```
+
+The hook runs through `sh` with `DEADWOOD_WORKTREE` and `DEADWOOD_MAIN_WORKTREE` set.
 
 #### Jump into a worktree
 
@@ -146,10 +171,12 @@ dw() { local dir; dir="$(deadwood "$@")" && [ -d "$dir" ] && cd "$dir"; }
 ## Command line
 
 ```
-deadwood [flags]
+deadwood [flags]                 open the interactive UI
+deadwood clean [flags]           delete merged branches without the UI
 
   --base <ref>        compare branches against this ref
   --stale-days <n>    mark branches without commits for n days as stale (default 90, 0 disables)
+  --prs               also count a branch as merged when gh reports its pull request merged
   --list              print the branches and their state, then exit
   --json              like --list, as JSON including worktrees
   --version           print the version
@@ -161,15 +188,39 @@ deadwood [flags]
 deadwood --json | jq -r '.branches[] | select(.merged and (.protected|not) and (.current|not)) | .name'
 ```
 
+### Unattended cleanup
+
+`deadwood clean` deletes every merged, squashed or rebased branch, with the same protections as the UI. Without `--yes` it only lists what it would delete:
+
+```sh
+deadwood clean                    # dry run
+deadwood clean --yes              # delete locally
+deadwood clean --yes --remote     # also delete their upstream branches
+deadwood clean --yes --stale      # also delete stale branches, merged or not
+```
+
+Each deletion prints the `git branch <name> <sha>` command that restores it. The exit status is non-zero when a branch could not be deleted.
+
+### Pull requests as a merge signal
+
+A squash merge whose conflicts were resolved by hand cannot be recognised by comparing patches. With `--prs`, or `git config deadwood.pullRequests true`, deadwood also asks the [GitHub CLI](https://cli.github.com) which pull requests were merged. A branch is marked `pr-merged` only when its tip is exactly the commit the pull request was merged at, so later commits are never mistaken for merged work. This needs `gh` installed and logged in, and makes loading slower.
+
 ## Configuration
 
-Deadwood reads three optional git config keys, per repository or `--global`:
+Everything is optional and lives in git config, per repository or `--global`:
 
 ```sh
 git config deadwood.base origin/develop        # default for --base
 git config deadwood.staleDays 30               # default for --stale-days
+git config deadwood.pullRequests true          # default for --prs
 git config --add deadwood.protect 'release/*'  # never delete these; repeat for more patterns
+git config deadwood.theme ocean                # default, ocean, ember or mono
+git config deadwood.keys.delete x              # remap a key
 ```
+
+**Themes.** `mono` uses no colour; it is also selected when the `NO_COLOR` environment variable is set.
+
+**Keys.** `deadwood.keys.<action> <key>` moves an action to another key. Actions: `select`, `selectall`, `selectmerged`, `selectstale`, `selectauthor`, `delete`, `archive`, `undo`, `rename`, `new`, `switch`, `push`, `pull`, `worktree`, `details`, `filter`, `sort`, `lock`, `fetch`, `refresh`, `help`, `quit`. Use `space` for the space bar. Keys are shared by both tabs, so `delete` also moves "remove worktree", `new` also moves "new worktree", `push` also moves "prune", and `selectmerged` also moves "remove merged worktrees".
 
 ## How it compares
 
@@ -183,14 +234,14 @@ Other tools do parts of this well. This is how they looked in October 2026, goin
 | Undo inside the app | yes | prints restore commands | no | no | — |
 | Rename and switch branches | yes | no | no | no | — |
 | Worktree management | yes | protects their branches | cleans up merged ones | no | yes |
-| Unattended cleanup (`--yes`) | no | yes | yes | yes | — |
-| Pull request and CI status | no | no | yes | no | yes |
+| Unattended cleanup (`--yes`) | yes | yes | yes | yes | — |
+| Pull request state | optional, as a merge signal | no | yes | no | yes, with CI status |
 
-If you want cleanup to run unattended in a script, or pull request status next to each worktree, those tools are the better pick today. Deadwood's bet is one interactive screen for both branches and worktrees, with deletes you can take back.
+If you want pull request and CI status next to each worktree, lazyworktree is the better pick today. Deadwood's bet is one interactive screen for both branches and worktrees, with deletes you can take back.
 
 ## Limits
 
-- Squash detection compares patches. A squash merge whose conflicts were resolved by hand produces a different patch and is not recognised; such a branch simply stays unmarked.
+- Squash detection compares patches. A squash merge whose conflicts were resolved by hand produces a different patch and is not recognised; such a branch simply stays unmarked unless you enable `--prs`.
 - Merge detection runs a few git commands per unmerged branch, so the first load takes longer in repositories with hundreds of them.
 - `gone` and the remote lease are only as fresh as your last fetch. Press `F` first.
 

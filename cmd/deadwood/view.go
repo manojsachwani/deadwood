@@ -42,7 +42,7 @@ func (m model) View() string {
 	var body string
 	switch {
 	case m.mode == modeHelp:
-		body = m.panel(width, helpText())
+		body = m.panel(width, m.helpText())
 	case m.mode == modeDetail:
 		body = m.panel(width, m.detailText(width))
 	case m.view == viewWorktrees:
@@ -177,6 +177,16 @@ func (m model) promptView() string {
 		return label("Delete "+m.targetSummary()+" "+where+"?") + warnStyle.Render(warning)
 	case modeRename:
 		return label("Rename "+m.targets[0].Name+" →") + m.input.View()
+	case modeRenameScope:
+		return label("Rename "+m.targets[0].Name+" → "+m.newName+".") +
+			mutedStyle.Render("Also rename "+m.targets[0].Upstream+"?")
+	case modeNewBranch:
+		return label("New branch from "+m.targets[0].Name+":") + m.input.View()
+	case modeArchiveConfirm:
+		return label("Archive "+m.targetSummary()+"?") +
+			mutedStyle.Render("Tagged as "+git.ArchivePrefix+"<name>, then deleted locally.")
+	case modeWorktreePruneMerged:
+		return label("Remove " + plural(len(m.mergedWorktrees()), "clean worktree") + " on merged branches?")
 	case modeWorktreeBranch:
 		return label("New worktree · branch:") + m.input.View()
 	case modeWorktreePath:
@@ -225,14 +235,15 @@ func (m model) helpView(width int) string {
 	case modeList:
 		if m.view == viewBranches {
 			hints = []hint{
-				{"space", "select"}, {"d", "delete"}, {"M", "select merged"}, {"/", "filter"},
-				{"?", "all keys"}, {"q", "quit"}, {"u", "undo"}, {"enter", "details"},
-				{"tab", "worktrees"}, {"o", "sort"},
+				{m.k(" "), "select"}, {m.k("d"), "delete"}, {m.k("M"), "select merged"}, {m.k("/"), "filter"},
+				{m.k("?"), "all keys"}, {m.k("q"), "quit"}, {m.k("u"), "undo"}, {m.k("enter"), "details"},
+				{"tab", "worktrees"}, {m.k("o"), "sort"},
 			}
 		} else {
 			hints = []hint{
-				{"n", "new"}, {"d", "remove"}, {"enter", "open"}, {"?", "all keys"},
-				{"q", "quit"}, {"l", "lock"}, {"p", "prune"}, {"tab", "branches"},
+				{m.k("n"), "new"}, {m.k("d"), "remove"}, {m.k("enter"), "open"}, {m.k("?"), "all keys"},
+				{m.k("q"), "quit"}, {m.k("M"), "remove merged"}, {m.k("l"), "lock"}, {m.k("p"), "prune"},
+				{"tab", "branches"},
 			}
 		}
 	case modeHelp, modeDetail:
@@ -241,7 +252,11 @@ func (m model) helpView(width int) string {
 		hints = []hint{{"enter", "keep filter"}, {"esc", "clear"}}
 	case modeDeleteScope:
 		hints = []hint{{"l", "local only"}, {"r", "local + remote"}, {"esc", "cancel"}}
-	case modeRename, modeWorktreeBranch, modeWorktreePath:
+	case modeRenameScope:
+		hints = []hint{{"l", "local only"}, {"r", "local + remote"}, {"esc", "cancel"}}
+	case modeWorktreePruneMerged:
+		hints = []hint{{"y", "remove"}, {"b", "remove + delete their branches"}, {"n", "cancel"}}
+	case modeRename, modeNewBranch, modeWorktreeBranch, modeWorktreePath:
 		hints = []hint{{"enter", "confirm"}, {"esc", "cancel"}}
 	case modeWorktreeRemove:
 		hints = []hint{{"y", "remove"}}
@@ -268,43 +283,46 @@ func (m model) helpView(width int) string {
 	return out
 }
 
-func helpText() string {
+func (m model) helpText() string {
 	section := func(title string, keys ...hint) string {
 		var b strings.Builder
 		b.WriteString(promptStyle.Render(title) + "\n")
 		for _, k := range keys {
-			b.WriteString("  " + keyStyle.Render(fmt.Sprintf("%-10s", k.key)) + mutedStyle.Render(k.desc) + "\n")
+			b.WriteString("  " + keyStyle.Render(fmt.Sprintf("%-8s", k.key)) + mutedStyle.Render(k.desc) + "\n")
 		}
 		return b.String()
 	}
 	branches := section("Branches",
-		hint{"space", "select / deselect"},
-		hint{"ctrl+a", "select all / none"},
-		hint{"M", "select merged, squashed and rebased"},
-		hint{"S", "select stale"},
-		hint{"d", "delete selection"},
-		hint{"u", "undo the last delete"},
-		hint{"r", "rename"},
-		hint{"s", "switch to branch"},
-		hint{"w", "create a worktree for it"},
-		hint{"enter", "show unmerged commits"},
-		hint{"/", "filter by name"},
-		hint{"o", "change sort order"},
+		hint{m.k(" "), "select / deselect"},
+		hint{m.k("ctrl+a"), "select all / none"},
+		hint{m.k("M"), "select merged, squashed, rebased"},
+		hint{m.k("S") + " " + m.k("A"), "select stale / by this author"},
+		hint{m.k("d"), "delete selection"},
+		hint{m.k("a"), "archive: tag, then delete"},
+		hint{m.k("u"), "undo the last delete"},
+		hint{m.k("r"), "rename, optionally on the remote"},
+		hint{m.k("n"), "new branch from this one"},
+		hint{m.k("s"), "switch to branch"},
+		hint{m.k("p") + " " + m.k("P"), "push / pull (fast-forward)"},
+		hint{m.k("w"), "create a worktree for it"},
+		hint{m.k("enter"), "show unmerged commits"},
+		hint{m.k("/") + " " + m.k("o"), "filter (* ? globs) / sort"},
 	)
 	other := section("Worktrees",
-		hint{"n", "new worktree"},
-		hint{"d", "remove (optionally with its branch)"},
-		hint{"enter", "quit and print its path"},
-		hint{"l", "lock / unlock"},
-		hint{"p", "prune missing entries"},
+		hint{m.k("n"), "new worktree"},
+		hint{m.k("d"), "remove, optionally with its branch"},
+		hint{m.k("M"), "remove all clean, merged ones"},
+		hint{m.k("enter"), "quit and print its path"},
+		hint{m.k("l"), "lock / unlock"},
+		hint{m.k("p"), "prune missing entries"},
 	) + "\n" + section("Everywhere",
 		hint{"tab 1 2", "switch tab"},
-		hint{"F", "fetch and prune remotes"},
-		hint{"ctrl+r", "refresh"},
+		hint{m.k("F"), "fetch and prune remotes"},
+		hint{m.k("ctrl+r"), "refresh"},
 		hint{"esc", "clear selection, then filter"},
-		hint{"q", "quit"},
+		hint{m.k("q"), "quit"},
 	)
-	return lipgloss.JoinHorizontal(lipgloss.Top, branches, "    ", other)
+	return lipgloss.JoinHorizontal(lipgloss.Top, branches, "   ", other)
 }
 
 func (m model) detailText(width int) string {
