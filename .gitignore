@@ -1,0 +1,11 @@
+# Built binary
+/deadwood
+/deadwood.exe
+/dist/
+
+# Phantasm: config and the exported memory.json are tracked, runtime state is not
+.phantasm/state/
+
+# Agent tooling backups
+CLAUDE.md.bak
+CLAUDE.md.phantasm-backup-*
