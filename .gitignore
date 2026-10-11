@@ -3,9 +3,10 @@
 /deadwood.exe
 /dist/
 
-# Local agent tooling: issue tracker, project memory and agent instructions
+# Local only: issue tracker, project memory, agent instructions and roadmap
 .beads/
 .phantasm/
 CLAUDE.md
+TODO.md
 CLAUDE.md.bak
 CLAUDE.md.phantasm-backup-*

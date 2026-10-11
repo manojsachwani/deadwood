@@ -203,7 +203,7 @@ go build -o deadwood ./cmd/deadwood
 go test ./...
 ```
 
-See [CONTRIBUTING.md](CONTRIBUTING.md). Planned work is in [TODO.md](TODO.md).
+See [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## License
 
