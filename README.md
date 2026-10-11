@@ -22,6 +22,8 @@ Deadwood shows every local branch with what you need to decide its fate — is i
  space select  ·  d delete  ·  M select merged  ·  / filter  ·  ? all keys  ·  q quit  ·  u undo
 ```
 
+![Deadwood showing the branches of a repository](deadwood-screenshot.png)
+
 ## Why
 
 - **It knows what is really merged.** `git branch --merged` misses branches that landed through GitHub's *Squash and merge* or *Rebase and merge*. Deadwood compares patches, so those show up as `squashed` and `rebased`, and `M` selects every branch that is safe to drop.
