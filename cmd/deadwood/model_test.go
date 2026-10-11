@@ -4,6 +4,7 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
@@ -12,14 +13,14 @@ import (
 
 func testModel(t *testing.T, width, height int) model {
 	t.Helper()
-	m := newModel("/src/app")
+	m := newModel("/src/app", git.Options{Base: "origin/main", StaleDays: 90})
 	m = send(m, tea.WindowSizeMsg{Width: width, Height: height})
 	return send(m, loadedMsg{
 		branches: []git.Branch{
-			{Name: "main", Current: true, Commit: "87c33da", Author: "Ada", Age: "2 days ago", Subject: "Add things", Upstream: "origin/main", Remote: "origin"},
-			{Name: "feature/login", Commit: "1a30a4e", Author: "Ada", Age: "3 weeks ago", Subject: "Login form", Upstream: "origin/feature/login", Remote: "origin", Ahead: 2, Behind: 1},
-			{Name: "old-spike", Commit: "93ab520", Author: "Grace", Age: "8 months ago", Subject: "Try a thing", Upstream: "origin/old-spike", Remote: "origin", Gone: true, Merged: true},
-			{Name: "hotfix", Commit: "884dcb3", Author: "Grace", Age: "5 hours ago", Subject: "Fix crash", Worktree: "/src/app-hotfix"},
+			{Name: "main", Current: true, Protected: true, Merge: git.Merged, Commit: "87c33da", Author: "Ada", Age: "2 days ago", Updated: day(2), Subject: "Add things", Upstream: "origin/main", Remote: "origin"},
+			{Name: "feature/login", Commit: "1a30a4e", Author: "Ada", Age: "3 weeks ago", Updated: day(21), Subject: "Login form", Upstream: "origin/feature/login", Remote: "origin", Ahead: 2, Behind: 1},
+			{Name: "old-spike", Commit: "93ab520", Author: "Grace", Age: "8 months ago", Subject: "Try a thing", Upstream: "origin/old-spike", Remote: "origin", Gone: true, Merge: git.Squashed, Stale: true, Updated: day(240)},
+			{Name: "hotfix", Commit: "884dcb3", Author: "Grace", Age: "5 hours ago", Updated: day(0), Subject: "Fix crash", Worktree: "/src/app-hotfix"},
 		},
 		worktrees: []git.Worktree{
 			{Path: "/src/app", Branch: "main", Commit: "87c33da", Main: true},
@@ -28,6 +29,8 @@ func testModel(t *testing.T, width, height int) model {
 		},
 	})
 }
+
+func day(n int) time.Time { return time.Now().Add(-time.Duration(n) * 24 * time.Hour) }
 
 func send(m model, msg tea.Msg) model {
 	next, _ := m.Update(msg)
@@ -117,8 +120,8 @@ func TestDeleteFlow(t *testing.T) {
 	if m.mode != modeDeleteConfirm || !m.remoteDelete {
 		t.Fatalf("mode = %v, remote = %v", m.mode, m.remoteDelete)
 	}
-	if !strings.Contains(m.View(), "Not merged") {
-		t.Error("deleting an unmerged branch should warn")
+	if !strings.Contains(m.View(), "Not merged into origin/main") || !strings.Contains(m.View(), "can't be undone") {
+		t.Error("deleting an unmerged branch on the remote should warn")
 	}
 	m = send(m, key("n"))
 	if m.mode != modeList {
@@ -127,13 +130,13 @@ func TestDeleteFlow(t *testing.T) {
 	m = send(m, key("down"))
 	m = send(m, key("d"))
 	m = send(m, key("l"))
-	if strings.Contains(m.View(), "may be lost") {
-		t.Error("deleting a merged branch should not warn about lost commits")
+	if strings.Contains(m.View(), "ot merged into") || !strings.Contains(m.View(), "Undo with u") {
+		t.Error("deleting a squashed branch locally should not warn about unmerged commits")
 	}
 }
 
 func TestEmptyRepository(t *testing.T) {
-	m := newModel("/src/app")
+	m := newModel("/src/app", git.Options{Base: "origin/main", StaleDays: 90})
 	m = send(m, tea.WindowSizeMsg{Width: 80, Height: 20})
 	m = send(m, loadedMsg{worktrees: []git.Worktree{{Path: "/src/app", Branch: "main", Main: true}}})
 	if !strings.Contains(m.View(), "No branches yet") {
@@ -148,7 +151,7 @@ func TestEmptyRepository(t *testing.T) {
 }
 
 func TestPaths(t *testing.T) {
-	m := newModel("/src/app")
+	m := newModel("/src/app", git.Options{Base: "origin/main", StaleDays: 90})
 	far := "/var/folders/some/really/long/temporary/location/for/worktrees/app-feature"
 	if got := m.inputPath("/src/app-x"); got != "../app-x" {
 		t.Errorf("inputPath sibling = %q", got)
@@ -188,8 +191,10 @@ func TestDeleteSkipsProtectedBranches(t *testing.T) {
 	msg := deleteBranches([]git.Branch{
 		{Name: "main", Current: true},
 		{Name: "hotfix", Worktree: "/src/app-hotfix"},
+		{Name: "develop", Protected: true},
 	}, false)
-	if !msg.failed || !strings.Contains(msg.status, "current branch") || !strings.Contains(msg.status, "checked out in a worktree") {
+	if !msg.failed || len(msg.deleted) != 0 || !strings.Contains(msg.status, "current branch") ||
+		!strings.Contains(msg.status, "checked out in a worktree") || !strings.Contains(msg.status, "protected") {
 		t.Errorf("unexpected result %+v", msg)
 	}
 }
@@ -229,5 +234,148 @@ func TestWorktreeFromBranch(t *testing.T) {
 	m = send(m, key("w"))
 	if m.mode != modeList || m.statusKind != statusError {
 		t.Errorf("branch already in a worktree should be refused: mode %v", m.mode)
+	}
+}
+
+func TestFilterAndSort(t *testing.T) {
+	m := testModel(t, 100, 24)
+	m = send(m, key(" "))
+	m = send(m, key("/"))
+	for _, r := range "FEAT" {
+		m = send(m, key(string(r)))
+	}
+	if len(m.visible) != 1 || m.visible[0].Name != "feature/login" || len(m.selected) != 0 {
+		t.Fatalf("visible = %+v, selected = %v", m.visible, m.selected)
+	}
+	m = send(m, key("enter"))
+	if m.mode != modeList || m.filter != "FEAT" {
+		t.Fatalf("enter should keep the filter: mode %v, filter %q", m.mode, m.filter)
+	}
+	m = send(m, key("d"))
+	if len(m.targets) != 1 || m.targets[0].Name != "feature/login" {
+		t.Errorf("actions must use the filtered list, got %+v", m.targets)
+	}
+	m = send(m, key("esc"))
+	m = send(m, key("esc"))
+	if m.filter != "" || len(m.visible) != 4 {
+		t.Errorf("esc should clear the filter: %q, %d visible", m.filter, len(m.visible))
+	}
+
+	m = send(m, key("/"))
+	m = send(m, key("z"))
+	if !strings.Contains(m.View(), "No branch matches") {
+		t.Error("a filter without matches should say so")
+	}
+	m = send(m, key("esc"))
+
+	m = send(m, key("o"))
+	if m.visible[0].Name != "hotfix" {
+		t.Errorf("newest first should start with hotfix, got %s", m.visible[0].Name)
+	}
+	m = send(m, key("o"))
+	if m.visible[0].Name != "old-spike" {
+		t.Errorf("oldest first should start with old-spike, got %s", m.visible[0].Name)
+	}
+}
+
+func TestSmartSelect(t *testing.T) {
+	m := testModel(t, 100, 24)
+	m = send(m, key("M"))
+	if _, ok := m.selected["old-spike"]; !ok || len(m.selected) != 1 {
+		t.Errorf("M should select only deletable merged branches, got %v", m.selected)
+	}
+	m = send(m, key("esc"))
+	m = send(m, key("S"))
+	if _, ok := m.selected["old-spike"]; !ok || len(m.selected) != 1 {
+		t.Errorf("S should select stale branches, got %v", m.selected)
+	}
+}
+
+func TestProtectedBranchIsRefused(t *testing.T) {
+	m := testModel(t, 100, 24)
+	m = send(m, key("d"))
+	if m.mode != modeList || m.statusKind != statusError || !strings.Contains(m.status, "cannot be deleted") {
+		t.Errorf("mode %v, status %q", m.mode, m.status)
+	}
+}
+
+func TestUndoBookkeeping(t *testing.T) {
+	m := testModel(t, 100, 24)
+	m = send(m, key("u"))
+	if m.busy != "" || !strings.Contains(m.status, "Nothing to undo") {
+		t.Errorf("busy %q, status %q", m.busy, m.status)
+	}
+	gone := []deletedBranch{{Branch: git.Branch{Name: "a", SHA: "1"}}, {Branch: git.Branch{Name: "b", SHA: "2"}}}
+	m = send(m, opDoneMsg{status: "Deleted", deleted: gone[:1]})
+	m = send(m, loadedMsg{})
+	m = send(m, opDoneMsg{status: "Deleted", deleted: gone[1:]})
+	m = send(m, loadedMsg{})
+	if len(m.undo) != 1 || m.undo[0].Name != "b" || len(m.deleted) != 2 {
+		t.Fatalf("undo = %+v, deleted = %+v", m.undo, m.deleted)
+	}
+	m = send(m, opDoneMsg{status: "Restored", restored: true})
+	if len(m.undo) != 0 || len(m.deleted) != 1 || m.deleted[0].Name != "a" {
+		t.Errorf("undo = %+v, deleted = %+v", m.undo, m.deleted)
+	}
+}
+
+func TestDetailAndHelp(t *testing.T) {
+	m := testModel(t, 100, 24)
+	m = send(m, key("down"))
+	m = send(m, key("enter"))
+	if m.mode != modeDetail || !strings.Contains(m.View(), "Loading commits") {
+		t.Fatalf("mode %v", m.mode)
+	}
+	m = send(m, detailMsg{name: "other", detail: git.Detail{Total: 9}})
+	if m.detail != nil {
+		t.Error("a detail for another branch must be ignored")
+	}
+	m = send(m, detailMsg{name: "feature/login", detail: git.Detail{Total: 2, Commits: []string{"abc one", "def two"}, Stat: "1 file changed"}})
+	view := m.View()
+	if !strings.Contains(view, "2 commits not in origin/main") || !strings.Contains(view, "abc one") {
+		t.Errorf("detail view:\n%s", view)
+	}
+	if h := lipgloss.Height(view); h > 24 {
+		t.Errorf("detail height %d overflows", h)
+	}
+	m = send(m, key("q"))
+	if m.mode != modeList {
+		t.Error("any key should close the detail view")
+	}
+	m = send(m, key("?"))
+	if m.mode != modeHelp || !strings.Contains(m.View(), "undo the last delete") || lipgloss.Height(m.View()) > 24 {
+		t.Error("help overlay should list the keys and fit")
+	}
+}
+
+func TestWorktreeOpenAndBranchRemoval(t *testing.T) {
+	m := testModel(t, 100, 24)
+	m = send(m, key("tab"))
+	m = send(m, key("down"))
+	m = send(m, key("d"))
+	if !strings.Contains(m.View(), "remove + delete branch hotfix") {
+		t.Errorf("removing a worktree should offer its branch:\n%s", m.View())
+	}
+	m = send(m, key("esc"))
+	next, cmd := m.Update(key("enter"))
+	if next.(model).chosenPath != "/src/app-hotfix" || cmd == nil {
+		t.Errorf("enter should pick the worktree, got %q", next.(model).chosenPath)
+	}
+}
+
+func TestShortAge(t *testing.T) {
+	const day = 24 * time.Hour
+	for d, want := range map[time.Duration]string{
+		30 * time.Second: "just now",
+		5 * time.Hour:    "5h ago",
+		3 * day:          "3d ago",
+		21 * day:         "3w ago",
+		240 * day:        "8mo ago",
+		645 * day:        "1y 9mo ago",
+		730 * day:        "2y ago",
+	} {
+		if got := shortAge(d); got != want {
+			t.Errorf("shortAge(%v) = %q, want %q", d, got, want)
+		}
 	}
 }

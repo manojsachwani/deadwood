@@ -4,7 +4,9 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
+	"time"
 )
 
 // initRepo creates a repository with one commit on main and chdirs into it.
@@ -52,7 +54,7 @@ func TestEmptyRepository(t *testing.T) {
 	t.Cleanup(func() { os.Chdir(prev) })
 	mustGit(t, "init", "-q", "-b", "main")
 
-	branches, err := ListBranches()
+	branches, err := ListBranches(Options{Base: "main"})
 	if err != nil || len(branches) != 0 {
 		t.Errorf("branches = %+v, err = %v", branches, err)
 	}
@@ -113,7 +115,7 @@ func TestBranchLifecycle(t *testing.T) {
 	mustGit(t, "branch", "feature/a")
 	mustGit(t, "branch", "old")
 
-	branches, err := ListBranches()
+	branches, err := ListBranches(Options{Base: "main"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -132,15 +134,15 @@ func TestBranchLifecycle(t *testing.T) {
 		t.Errorf("old parsed as %+v", byName["old"])
 	}
 
-	if !byName["old"].Merged {
+	if byName["old"].Merge != Merged || !byName["main"].Protected || byName["old"].Protected {
 		t.Errorf("old points at HEAD and should be merged: %+v", byName["old"])
 	}
 	mustGit(t, "checkout", "-q", "feature/a")
 	mustGit(t, "commit", "-q", "--allow-empty", "-m", "ahead")
 	mustGit(t, "checkout", "-q", "main")
-	branches, _ = ListBranches()
+	branches, _ = ListBranches(Options{Base: "main"})
 	for _, b := range branches {
-		if b.Name == "feature/a" && b.Merged {
+		if b.Name == "feature/a" && b.Merge != NotMerged {
 			t.Error("feature/a has an extra commit and should not be merged")
 		}
 	}
@@ -151,14 +153,14 @@ func TestBranchLifecycle(t *testing.T) {
 	if BranchExists("old") || !BranchExists("renamed") {
 		t.Error("rename did not take effect")
 	}
-	if err := DeleteBranch(Branch{Name: "renamed"}, true); err != nil {
+	if _, err := DeleteBranch(Branch{Name: "renamed"}, true); err != nil {
 		t.Fatal(err)
 	}
 	if BranchExists("renamed") {
 		t.Error("branch still exists after delete")
 	}
 
-	err = DeleteBranch(Branch{Name: "main"}, false)
+	_, err = DeleteBranch(Branch{Name: "main"}, false)
 	if err == nil {
 		t.Fatal("deleting the current branch should fail")
 	}
@@ -175,7 +177,7 @@ func TestDeleteBranchRemote(t *testing.T) {
 	mustGit(t, "branch", "feat")
 	mustGit(t, "push", "-q", "-u", "upstream", "feat:feat-remote")
 
-	branches, err := ListBranches()
+	branches, err := ListBranches(Options{Base: "main"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -188,15 +190,163 @@ func TestDeleteBranchRemote(t *testing.T) {
 	if feat.Upstream != "upstream/feat-remote" || feat.Remote != "upstream" {
 		t.Fatalf("feat parsed as %+v", feat)
 	}
-	if err := DeleteBranch(feat, true); err != nil {
+	// Someone else pushes to the remote branch: the lease must refuse.
+	mustGit(t, "branch", "other", "feat")
+	other := filepath.Join(filepath.Dir(repo), "other")
+	mustGit(t, "clone", "-q", remote, other, "-b", "feat-remote")
+	mustGit(t, "-C", other, "-c", "user.name=T", "-c", "user.email=t@example.com", "commit", "-q", "--allow-empty", "-m", "newer")
+	mustGit(t, "-C", other, "push", "-q", "origin", "feat-remote")
+	if deleted, err := DeleteBranch(feat, true); err == nil || deleted {
+		t.Fatalf("stale lease should refuse the remote delete, got deleted=%v err=%v", deleted, err)
+	}
+	if out, _ := exec.Command("git", "ls-remote", "--heads", remote).Output(); len(out) == 0 {
+		t.Fatal("remote branch was deleted despite having moved")
+	}
+
+	// After a fetch the lease is current again.
+	if err := RestoreBranch(feat); err != nil {
 		t.Fatal(err)
 	}
-	out, err := exec.Command("git", "ls-remote", "--heads", remote).Output()
+	if err := Fetch(); err != nil {
+		t.Fatal(err)
+	}
+	branches, _ = ListBranches(Options{Base: "main"})
+	for _, b := range branches {
+		if b.Name == "feat" {
+			feat = b
+		}
+	}
+	if feat.Upstream != "upstream/feat-remote" {
+		t.Fatalf("restore should re-attach the upstream: %+v", feat)
+	}
+	deleted, err := DeleteBranch(feat, true)
+	if err != nil || !deleted {
+		t.Fatalf("deleted=%v err=%v", deleted, err)
+	}
+	if out, _ := exec.Command("git", "ls-remote", "--heads", remote, "feat-remote").Output(); len(out) != 0 {
+		t.Errorf("remote branch still exists: %s", out)
+	}
+}
+
+func commitFile(t *testing.T, name, content, msg string) {
+	t.Helper()
+	if err := os.WriteFile(name, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	mustGit(t, "add", name)
+	mustGit(t, "commit", "-q", "-m", msg)
+}
+
+func TestSquashAndRebaseDetection(t *testing.T) {
+	initRepo(t)
+	commitFile(t, "base.txt", "base\n", "base file")
+
+	mustGit(t, "checkout", "-q", "-b", "squashed")
+	commitFile(t, "a.txt", "one\n", "a1")
+	commitFile(t, "a.txt", "one\ntwo\n", "a2")
+	mustGit(t, "checkout", "-q", "main")
+
+	mustGit(t, "checkout", "-q", "-b", "rebased")
+	commitFile(t, "b.txt", "one\n", "b1")
+	commitFile(t, "c.txt", "one\n", "b2")
+	mustGit(t, "checkout", "-q", "main")
+
+	mustGit(t, "checkout", "-q", "-b", "unmerged")
+	commitFile(t, "d.txt", "one\n", "d1")
+	mustGit(t, "checkout", "-q", "main")
+
+	// Main moves on, then lands the two branches the way GitHub would.
+	commitFile(t, "main.txt", "x\n", "main moves on")
+	mustGit(t, "merge", "-q", "--squash", "squashed")
+	mustGit(t, "commit", "-q", "-m", "squashed (#1)")
+	mustGit(t, "cherry-pick", "rebased~1", "rebased")
+
+	branches, err := ListBranches(Options{Base: "main"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(out) != 0 {
-		t.Errorf("remote branch still exists: %s", out)
+	want := map[string]MergeKind{"squashed": Squashed, "rebased": Rebased, "unmerged": NotMerged, "main": Merged}
+	for _, b := range branches {
+		if b.Merge != want[b.Name] {
+			t.Errorf("%s: merge = %q, want %q", b.Name, b.Merge, want[b.Name])
+		}
+	}
+}
+
+func TestDeleteRefusesMovedBranch(t *testing.T) {
+	initRepo(t)
+	mustGit(t, "branch", "topic")
+	branches, _ := ListBranches(Options{Base: "main"})
+	var topic Branch
+	for _, b := range branches {
+		if b.Name == "topic" {
+			topic = b
+		}
+	}
+	mustGit(t, "checkout", "-q", "topic")
+	mustGit(t, "commit", "-q", "--allow-empty", "-m", "new work")
+	mustGit(t, "checkout", "-q", "main")
+	if _, err := DeleteBranch(topic, false); err != ErrMoved {
+		t.Fatalf("err = %v, want ErrMoved", err)
+	}
+	if !BranchExists("topic") {
+		t.Error("moved branch must survive")
+	}
+}
+
+func TestOptions(t *testing.T) {
+	initRepo(t)
+	mustGit(t, "config", "--add", "deadwood.protect", "release/*")
+	mustGit(t, "config", "deadwood.staleDays", "30")
+	mustGit(t, "branch", "release/1.0")
+	mustGit(t, "branch", "topic")
+
+	opts, err := LoadOptions("", -1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if opts.Base != "main" || opts.StaleDays != 30 {
+		t.Errorf("opts = %+v", opts)
+	}
+	if !opts.protects("release/1.0") || !opts.protects("main") || opts.protects("topic") {
+		t.Error("protection patterns not applied")
+	}
+	if opts, _ := LoadOptions("", 7); opts.StaleDays != 7 {
+		t.Errorf("flag should override config, got %d", opts.StaleDays)
+	}
+	if _, err := LoadOptions("nope", -1); err == nil {
+		t.Error("an unknown base should be rejected")
+	}
+
+	branches, _ := ListBranches(opts)
+	for _, b := range branches {
+		if b.Stale {
+			t.Errorf("%s was committed just now and is not stale", b.Name)
+		}
+	}
+	t.Setenv("GIT_COMMITTER_DATE", time.Now().Add(-40*24*time.Hour).Format(time.RFC3339))
+	mustGit(t, "checkout", "-q", "topic")
+	mustGit(t, "commit", "-q", "--allow-empty", "-m", "old work")
+	branches, _ = ListBranches(opts)
+	for _, b := range branches {
+		if b.Name == "topic" && !b.Stale {
+			t.Error("topic was last committed 40 days ago and should be stale at 30")
+		}
+	}
+}
+
+func TestBranchDetail(t *testing.T) {
+	initRepo(t)
+	mustGit(t, "checkout", "-q", "-b", "topic")
+	commitFile(t, "a.txt", "one\n", "first")
+	commitFile(t, "a.txt", "one\ntwo\n", "second")
+	mustGit(t, "checkout", "-q", "main")
+	d, err := BranchDetail("main", "topic")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if d.Total != 2 || len(d.Commits) != 2 || !strings.Contains(d.Commits[0], "second") || !strings.Contains(d.Stat, "1 file changed") {
+		t.Errorf("detail = %+v", d)
 	}
 }
 
@@ -240,7 +390,7 @@ func TestWorktreeLifecycle(t *testing.T) {
 		t.Errorf("worktree with untracked file should be dirty: %+v", byPath[wtNew])
 	}
 
-	branches, err := ListBranches()
+	branches, err := ListBranches(Options{Base: "main"})
 	if err != nil {
 		t.Fatal(err)
 	}

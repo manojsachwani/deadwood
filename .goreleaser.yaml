@@ -1,0 +1,71 @@
+# Release configuration. Runs from .github/workflows/release.yml on every
+# v* tag; try it locally with:  goreleaser release --snapshot --clean
+version: 2
+
+project_name: deadwood
+
+builds:
+  - id: deadwood
+    main: ./cmd/deadwood
+    binary: deadwood
+    env:
+      - CGO_ENABLED=0
+    goos: [linux, darwin, windows]
+    goarch: [amd64, arm64]
+    flags:
+      - -trimpath
+    ldflags:
+      - -s -w -X main.version={{ .Version }}
+
+archives:
+  - formats: [tar.gz]
+    name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    format_overrides:
+      - goos: windows
+        formats: [zip]
+    files:
+      - LICENSE
+      - README.md
+
+checksum:
+  name_template: checksums.txt
+
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"
+      - "^chore:"
+      - Merge pull request
+      - Merge branch
+
+release:
+  prerelease: auto # tags like v1.2.0-rc.1 are published as pre-releases
+
+# Publishes Casks/deadwood.rb to github.com/manojsachwani/homebrew-taps so that
+# `brew install manojsachwani/taps/deadwood` works. Skipped until the
+# HOMEBREW_TAP_TOKEN secret exists, so releases work without the tap.
+homebrew_casks:
+  - name: deadwood
+    repository:
+      owner: manojsachwani
+      name: homebrew-taps
+      token: "{{ .Env.HOMEBREW_TAP_TOKEN }}"
+    directory: Casks
+    homepage: https://github.com/manojsachwani/deadwood
+    description: Terminal UI for clearing out git branches and worktrees
+    binaries:
+      - deadwood
+    skip_upload: "{{ if .Env.HOMEBREW_TAP_TOKEN }}auto{{ else }}true{{ end }}"
+    commit_author:
+      name: goreleaserbot
+      email: bot@goreleaser.com
+    # The binaries are not signed or notarized, so macOS quarantines them
+    # when Homebrew downloads the archive. This lifts the quarantine.
+    hooks:
+      post:
+        install: |
+          if OS.mac?
+            system_command "/usr/bin/xattr", args: ["-dr", "com.apple.quarantine", "#{staged_path}/deadwood"]
+          end

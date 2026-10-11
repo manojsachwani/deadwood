@@ -7,15 +7,15 @@ import (
 
 // Worktree represents one entry of `git worktree list`
 type Worktree struct {
-	Path     string
-	Branch   string // short branch name, empty when detached or bare
-	Commit   string // short SHA
-	Main     bool   // the main working tree, which cannot be removed
-	Bare     bool
-	Detached bool
-	Locked   bool
-	Prunable bool // the directory is gone and the entry can be pruned
-	Dirty    bool // has uncommitted or untracked changes
+	Path     string `json:"path"`
+	Branch   string `json:"branch,omitempty"` // short branch name, empty when detached or bare
+	Commit   string `json:"commit,omitempty"` // short SHA
+	Main     bool   `json:"main"`             // the main working tree, which cannot be removed
+	Bare     bool   `json:"bare"`
+	Detached bool   `json:"detached"`
+	Locked   bool   `json:"locked"`
+	Prunable bool   `json:"prunable"` // the directory is gone and the entry can be pruned
+	Dirty    bool   `json:"dirty"`    // has uncommitted or untracked changes
 }
 
 // ListWorktrees returns all worktrees of the repository, main one first

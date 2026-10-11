@@ -24,7 +24,6 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.branches = msg.branches
 		m.worktrees = msg.worktrees
-		m.pruneSelection()
 		m.refreshTables()
 		return m, nil
 
@@ -33,9 +32,28 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.failed {
 			kind = statusError
 		}
+		if len(msg.deleted) > 0 {
+			m.undo = msg.deleted
+			m.deleted = append(m.deleted, msg.deleted...)
+		}
+		if msg.restored {
+			m.forgetDeleted(m.undo)
+			m.undo = nil
+		}
 		m.selected = make(map[string]struct{})
 		m.busy = "Refreshing"
-		return m, tea.Batch(m.setStatus(kind, msg.status), loadCmd)
+		return m, tea.Batch(m.setStatus(kind, msg.status), m.loadCmd())
+
+	case detailMsg:
+		if m.mode != modeDetail || msg.name != m.detailFor.Name {
+			return m, nil
+		}
+		if msg.err != nil {
+			m.mode = modeList
+			return m, m.setStatus(statusError, msg.err.Error())
+		}
+		m.detail = &msg.detail
+		return m, nil
 
 	case clearStatusMsg:
 		if msg.id == m.statusID {
@@ -44,7 +62,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case spinner.TickMsg:
-		if m.busy == "" {
+		if m.busy == "" && !(m.mode == modeDetail && m.detail == nil) {
 			return m, nil
 		}
 		var cmd tea.Cmd
@@ -58,17 +76,20 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.busy != "" {
 			return m, nil
 		}
-		switch m.mode {
-		case modeList:
+		switch {
+		case m.mode == modeList:
 			return m.updateList(msg)
-		case modeRename, modeWorktreeBranch, modeWorktreePath:
+		case m.mode == modeDetail || m.mode == modeHelp:
+			m.mode = modeList
+			return m, nil
+		case m.mode.isInput():
 			return m.updateInput(msg)
 		default:
 			return m.updateConfirm(msg)
 		}
 	}
 
-	if m.mode == modeRename || m.mode == modeWorktreeBranch || m.mode == modeWorktreePath {
+	if m.mode.isInput() {
 		var cmd tea.Cmd
 		m.input, cmd = m.input.Update(msg)
 		return m, cmd
@@ -76,23 +97,29 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-// pruneSelection drops selected names that no longer exist.
-func (m *model) pruneSelection() {
-	names := make(map[string]struct{}, len(m.branches))
-	for _, b := range m.branches {
-		names[b.Name] = struct{}{}
+// forgetDeleted removes restored branches from the session's delete log.
+func (m *model) forgetDeleted(restored []deletedBranch) {
+	names := make(map[string]bool, len(restored))
+	for _, d := range restored {
+		names[d.Name] = true
 	}
-	for name := range m.selected {
-		if _, ok := names[name]; !ok {
-			delete(m.selected, name)
+	kept := m.deleted[:0:0]
+	for _, d := range m.deleted {
+		if !names[d.Name] {
+			kept = append(kept, d)
 		}
 	}
+	m.deleted = kept
 }
 
 func (m model) updateList(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "q":
 		return m, tea.Quit
+	case "?":
+		m.mode = modeHelp
+		m.status = ""
+		return m, nil
 	case "tab", "shift+tab":
 		m.view = 1 - m.view
 		m.status = ""
@@ -105,7 +132,14 @@ func (m model) updateList(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case "ctrl+r":
 		m.busy = "Refreshing"
-		return m, tea.Batch(loadCmd, m.spinner.Tick)
+		return m, tea.Batch(m.loadCmd(), m.spinner.Tick)
+	case "F":
+		return m, m.run("Fetching", func() opDoneMsg {
+			if err := git.Fetch(); err != nil {
+				return opDoneMsg{status: "Fetch failed: " + err.Error(), failed: true}
+			}
+			return opDoneMsg{status: "Fetched and pruned remotes"}
+		})
 	}
 	if m.view == viewWorktrees {
 		return m.updateWorktreeList(msg)
@@ -130,31 +164,71 @@ func (m model) updateBranchList(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case "ctrl+a":
-		if len(m.selected) == len(m.branches) {
+		if len(m.selected) == len(m.visible) {
 			m.selected = make(map[string]struct{})
 		} else {
-			for _, b := range m.branches {
+			for _, b := range m.visible {
 				m.selected[b.Name] = struct{}{}
 			}
 		}
 		m.refreshTables()
 		return m, nil
 
-	case "esc":
-		if len(m.selected) > 0 {
-			m.selected = make(map[string]struct{})
-			m.refreshTables()
+	case "M":
+		n := m.selectWhere(func(b git.Branch) bool { return b.Merge != git.NotMerged })
+		m.refreshTables()
+		if n == 0 {
+			return m, m.setStatus(statusInfo, "No merged branches to select")
 		}
+		return m, m.setStatus(statusInfo, "Selected "+plural(n, "merged branch"))
+
+	case "S":
+		n := m.selectWhere(func(b git.Branch) bool { return b.Stale })
+		m.refreshTables()
+		if n == 0 {
+			return m, m.setStatus(statusInfo, fmt.Sprintf("No branches older than %d days", m.opts.StaleDays))
+		}
+		return m, m.setStatus(statusInfo, "Selected "+plural(n, "stale branch"))
+
+	case "esc":
+		switch {
+		case len(m.selected) > 0:
+			m.selected = make(map[string]struct{})
+		case m.filter != "":
+			m.filter = ""
+		}
+		m.refreshTables()
 		return m, nil
+
+	case "/":
+		return m, m.startInput(modeFilter, "type to filter", m.filter)
+
+	case "o":
+		m.sort = (m.sort + 1) % sortModes
+		m.refreshTables()
+		m.branchTable.GotoTop()
+		return m, m.setStatus(statusInfo, "Sorted by "+m.sort.String())
 
 	case "d":
 		m.targets = m.actionBranches()
 		if len(m.targets) == 0 {
 			return m, nil
 		}
+		if len(m.targets) == 1 {
+			if ok, reason := deletable(m.targets[0]); !ok {
+				return m, m.setStatus(statusError, fmt.Sprintf("%s cannot be deleted: %s", m.targets[0].Name, reason))
+			}
+		}
 		m.mode = modeDeleteScope
 		m.status = ""
 		return m, nil
+
+	case "u":
+		if len(m.undo) == 0 {
+			return m, m.setStatus(statusInfo, "Nothing to undo")
+		}
+		batch := m.undo
+		return m, m.run("Restoring", func() opDoneMsg { return restoreBranches(batch) })
 
 	case "r":
 		targets := m.actionBranches()
@@ -163,6 +237,36 @@ func (m model) updateBranchList(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		m.targets = targets
 		return m, m.startInput(modeRename, "new branch name", targets[0].Name)
+
+	case "s":
+		b, ok := m.cursorBranch()
+		if !ok || b.Current {
+			return m, nil
+		}
+		if b.Worktree != "" {
+			return m, m.setStatus(statusError, b.Name+" is checked out at "+m.showPath(b.Worktree))
+		}
+		return m, m.run("Switching", func() opDoneMsg {
+			if err := git.SwitchBranch(b.Name); err != nil {
+				return opDoneMsg{status: "Switch failed: " + err.Error(), failed: true}
+			}
+			return opDoneMsg{status: "Switched to " + b.Name}
+		})
+
+	case "enter", "i":
+		b, ok := m.cursorBranch()
+		if !ok {
+			return m, nil
+		}
+		m.mode = modeDetail
+		m.detailFor = b
+		m.detail = nil
+		m.status = ""
+		base := m.opts.Base
+		return m, tea.Batch(m.spinner.Tick, func() tea.Msg {
+			d, err := git.BranchDetail(base, b.Name)
+			return detailMsg{name: b.Name, detail: d, err: err}
+		})
 
 	case "w":
 		b, ok := m.cursorBranch()
@@ -185,6 +289,17 @@ func (m model) updateWorktreeList(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "n":
 		return m, m.startInput(modeWorktreeBranch, "existing or new branch name", "")
+
+	case "enter":
+		wt, ok := m.cursorWorktree()
+		if !ok {
+			return m, nil
+		}
+		if wt.Prunable || wt.Bare {
+			return m, m.setStatus(statusError, "This worktree has no directory to open")
+		}
+		m.chosenPath = wt.Path
+		return m, tea.Quit
 
 	case "d":
 		wt, ok := m.cursorWorktree()
@@ -242,13 +357,26 @@ func (m model) updateWorktreeList(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 func (m model) updateInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "esc":
+		if m.mode == modeFilter {
+			m.filter = ""
+			m.refreshTables()
+		}
 		m.cancel()
 		return m, nil
 	case "enter":
+		if m.mode == modeFilter {
+			m.cancel()
+			return m, nil
+		}
 		return m.submitInput()
 	}
 	var cmd tea.Cmd
 	m.input, cmd = m.input.Update(msg)
+	if m.mode == modeFilter && m.filter != m.input.Value() {
+		m.filter = m.input.Value()
+		m.refreshTables()
+		m.branchTable.GotoTop()
+	}
 	return m, cmd
 }
 
@@ -318,13 +446,26 @@ func (m model) updateConfirm(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 
 	case modeWorktreeRemove:
-		if key == "y" {
-			wt := m.wtTarget
+		wt := m.wtTarget
+		branch, withBranch := m.worktreeBranch(wt)
+		if key == "y" || (key == "b" && withBranch) {
+			alsoBranch := key == "b"
 			return m, m.run("Removing worktree", func() opDoneMsg {
 				if err := git.RemoveWorktree(wt, wt.Dirty || wt.Locked); err != nil {
 					return opDoneMsg{status: "Remove failed: " + err.Error(), failed: true}
 				}
-				return opDoneMsg{status: "Removed worktree " + m.showPath(wt.Path)}
+				done := opDoneMsg{status: "Removed worktree " + m.showPath(wt.Path)}
+				if !alsoBranch {
+					return done
+				}
+				if _, err := git.DeleteBranch(branch, false); err != nil {
+					done.status += ", but not branch " + branch.Name + ": " + err.Error()
+					done.failed = true
+					return done
+				}
+				done.status += " and branch " + branch.Name + " · u to undo the branch"
+				done.deleted = []deletedBranch{{Branch: branch}}
+				return done
 			})
 		}
 
@@ -342,32 +483,62 @@ func (m model) updateConfirm(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+// worktreeBranch returns the branch a worktree has checked out and whether
+// it may be deleted together with the worktree.
+func (m model) worktreeBranch(wt git.Worktree) (git.Branch, bool) {
+	for _, b := range m.branches {
+		if b.Name == wt.Branch && wt.Branch != "" {
+			return b, !b.Protected
+		}
+	}
+	return git.Branch{}, false
+}
+
 func deleteBranches(targets []git.Branch, remote bool) opDoneMsg {
-	deleted := 0
+	var deleted []deletedBranch
 	var failed []string
 	for _, b := range targets {
-		var reason string
-		switch {
-		case b.Current:
-			reason = "current branch"
-		case b.Worktree != "":
-			reason = "checked out in a worktree"
-		default:
-			if err := git.DeleteBranch(b, remote); err != nil {
-				reason = err.Error()
+		ok, reason := deletable(b)
+		if ok {
+			remoteDeleted, err := git.DeleteBranch(b, remote)
+			if err == nil || !git.BranchExists(b.Name) {
+				deleted = append(deleted, deletedBranch{Branch: b, remote: remoteDeleted})
 			}
-		}
-		if reason == "" {
-			deleted++
-			continue
+			if err == nil {
+				continue
+			}
+			reason = err.Error()
 		}
 		failed = append(failed, fmt.Sprintf("%s (%s)", b.Name, reason))
 	}
 	if len(failed) == 0 {
-		return opDoneMsg{status: "Deleted " + plural(deleted, "branch")}
+		return opDoneMsg{status: "Deleted " + plural(len(deleted), "branch") + " · u to undo", deleted: deleted}
 	}
 	return opDoneMsg{
-		status: fmt.Sprintf("Deleted %d, skipped %s", deleted, strings.Join(failed, ", ")),
-		failed: true,
+		status:  fmt.Sprintf("Deleted %d · not done: %s", len(deleted), strings.Join(failed, ", ")),
+		failed:  true,
+		deleted: deleted,
 	}
+}
+
+func restoreBranches(batch []deletedBranch) opDoneMsg {
+	var failed []string
+	remote := 0
+	for _, d := range batch {
+		if err := git.RestoreBranch(d.Branch); err != nil {
+			failed = append(failed, fmt.Sprintf("%s (%s)", d.Name, err))
+			continue
+		}
+		if d.remote {
+			remote++
+		}
+	}
+	if len(failed) > 0 {
+		return opDoneMsg{status: "Could not restore " + strings.Join(failed, ", "), failed: true}
+	}
+	status := "Restored " + plural(len(batch), "branch")
+	if remote > 0 {
+		status += " locally · remote copies stay deleted, push to recreate them"
+	}
+	return opDoneMsg{status: status, restored: true}
 }

@@ -1,61 +1,43 @@
 name: Release
 
+# Push a semver tag to publish a release:
+#   git tag v1.1.0 && git push origin v1.1.0
 on:
   push:
     tags:
-      - "v*"
+      - "v*.*.*"
 
 permissions:
   contents: write
 
 jobs:
-  build:
+  test:
     runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        goos: [linux, darwin, windows]
-        goarch: [amd64, arm64]
     steps:
-      - uses: actions/checkout@v4
-      - name: Set up Go
-        uses: actions/setup-go@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
-      - name: Build
-        run: |
-          mkdir -p dist
-          if [ "${{ matrix.goos }}" = "windows" ]; then
-            GOOS=${{ matrix.goos }} GOARCH=${{ matrix.goarch }} go build -o dist/deadwood-${{ matrix.goos }}-${{ matrix.goarch }}.exe ./cmd/
-          else
-            GOOS=${{ matrix.goos }} GOARCH=${{ matrix.goarch }} go build -o dist/deadwood-${{ matrix.goos }}-${{ matrix.goarch }} ./cmd/
-          fi
-      - name: Upload Artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: deadwood-${{ matrix.goos }}-${{ matrix.goarch }}
-          path: dist/deadwood-${{ matrix.goos }}-${{ matrix.goarch }}*
+      - run: go vet ./...
+      - run: go test ./...
 
   release:
-    needs: build
+    needs: test
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - name: Download all build artifacts
-        uses: actions/download-artifact@v4
+      - uses: actions/checkout@v7
         with:
-          path: dist
-      - name: List downloaded artifacts
-        run: |
-          echo "Downloaded artifacts:"
-          find dist -type f -name "deadwood-*" | sort
-      - name: Flatten artifacts
-        run: |
-          mkdir -p release-assets
-          find dist -type f -name "deadwood-*" -exec cp {} release-assets/ \;
-          ls -la release-assets/
-      - name: Create Release
-        uses: softprops/action-gh-release@v2
+          fetch-depth: 0 # the changelog needs the full history
+      - uses: actions/setup-go@v7
         with:
-          files: release-assets/deadwood-*
+          go-version-file: go.mod
+      - uses: goreleaser/goreleaser-action@v7
+        with:
+          distribution: goreleaser
+          version: "~> v2"
+          args: release --clean
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Token with write access to manojsachwani/homebrew-taps. While it
+          # is unset the Homebrew step is skipped.
+          HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}

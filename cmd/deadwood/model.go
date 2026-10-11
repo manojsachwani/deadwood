@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -25,6 +26,9 @@ type mode int
 
 const (
 	modeList mode = iota
+	modeFilter
+	modeDetail
+	modeHelp
 	modeDeleteScope
 	modeDeleteConfirm
 	modeRename
@@ -33,6 +37,28 @@ const (
 	modeWorktreeRemove
 	modeWorktreePrune
 )
+
+// isInput reports whether the mode has the text input focused.
+func (md mode) isInput() bool {
+	switch md {
+	case modeFilter, modeRename, modeWorktreeBranch, modeWorktreePath:
+		return true
+	}
+	return false
+}
+
+type sortMode int
+
+const (
+	sortName sortMode = iota
+	sortNewest
+	sortOldest
+	sortModes
+)
+
+func (s sortMode) String() string {
+	return [...]string{"name", "newest first", "oldest first"}[s]
+}
 
 type statusKind int
 
@@ -44,17 +70,27 @@ const (
 
 const statusTimeout = 6 * time.Second
 
+// deletedBranch is a branch deadwood removed, kept so it can be restored.
+type deletedBranch struct {
+	git.Branch
+	remote bool // its upstream branch was deleted too
+}
+
 type model struct {
 	root string // worktree deadwood was started in
+	opts git.Options
 
 	view viewID
 	mode mode
 
-	branches      []git.Branch
+	branches      []git.Branch // everything git reported
+	visible       []git.Branch // filtered and sorted; what the table shows
 	worktrees     []git.Worktree
 	branchTable   table.Model
 	worktreeTable table.Model
 	selected      map[string]struct{} // branch names
+	filter        string
+	sort          sortMode
 
 	input   textinput.Model
 	spinner spinner.Model
@@ -70,6 +106,13 @@ type model struct {
 	wtBranch     string
 	wtTarget     git.Worktree
 
+	detailFor git.Branch
+	detail    *git.Detail // nil while loading
+
+	undo       []deletedBranch // the last delete, restorable with u
+	deleted    []deletedBranch // everything deleted and not restored this session
+	chosenPath string          // worktree picked with enter, printed on exit
+
 	width  int
 	height int
 }
@@ -81,13 +124,21 @@ type loadedMsg struct {
 }
 
 type opDoneMsg struct {
-	status string
-	failed bool
+	status   string
+	failed   bool
+	deleted  []deletedBranch
+	restored bool // the undo batch was put back
+}
+
+type detailMsg struct {
+	name   string
+	detail git.Detail
+	err    error
 }
 
 type clearStatusMsg struct{ id int }
 
-func newModel(root string) model {
+func newModel(root string, opts git.Options) model {
 	newTable := func() table.Model {
 		t := table.New(table.WithFocused(true))
 		t.SetStyles(tableStyles())
@@ -100,6 +151,7 @@ func newModel(root string) model {
 	sp.Style = promptStyle
 	return model{
 		root:          root,
+		opts:          opts,
 		branchTable:   newTable(),
 		worktreeTable: newTable(),
 		selected:      make(map[string]struct{}),
@@ -110,16 +162,19 @@ func newModel(root string) model {
 }
 
 func (m model) Init() tea.Cmd {
-	return tea.Batch(loadCmd, m.spinner.Tick)
+	return tea.Batch(m.loadCmd(), m.spinner.Tick)
 }
 
-func loadCmd() tea.Msg {
-	branches, err := git.ListBranches()
-	if err != nil {
-		return loadedMsg{err: err}
+func (m model) loadCmd() tea.Cmd {
+	opts := m.opts
+	return func() tea.Msg {
+		branches, err := git.ListBranches(opts)
+		if err != nil {
+			return loadedMsg{err: err}
+		}
+		worktrees, err := git.ListWorktrees()
+		return loadedMsg{branches: branches, worktrees: worktrees, err: err}
 	}
-	worktrees, err := git.ListWorktrees()
-	return loadedMsg{branches: branches, worktrees: worktrees, err: err}
 }
 
 // mainRoot is the main working tree, which new worktrees are placed next to.
@@ -132,10 +187,10 @@ func (m model) mainRoot() string {
 
 func (m model) cursorBranch() (git.Branch, bool) {
 	i := m.branchTable.Cursor()
-	if i < 0 || i >= len(m.branches) {
+	if i < 0 || i >= len(m.visible) {
 		return git.Branch{}, false
 	}
-	return m.branches[i], true
+	return m.visible[i], true
 }
 
 func (m model) cursorWorktree() (git.Worktree, bool) {
@@ -150,7 +205,7 @@ func (m model) cursorWorktree() (git.Worktree, bool) {
 // when nothing is selected.
 func (m model) actionBranches() []git.Branch {
 	var out []git.Branch
-	for _, b := range m.branches {
+	for _, b := range m.visible {
 		if _, ok := m.selected[b.Name]; ok {
 			out = append(out, b)
 		}
@@ -163,12 +218,26 @@ func (m model) actionBranches() []git.Branch {
 	return out
 }
 
-// unmergedCount is the number of pending delete targets with commits that
-// are not on the current branch.
+// deletable reports whether deadwood will delete the branch at all, and if
+// not, why.
+func deletable(b git.Branch) (bool, string) {
+	switch {
+	case b.Current:
+		return false, "current branch"
+	case b.Worktree != "":
+		return false, "checked out in a worktree"
+	case b.Protected:
+		return false, "protected"
+	}
+	return true, ""
+}
+
+// unmergedCount is the number of pending delete targets whose commits are
+// not in the base branch.
 func (m model) unmergedCount() int {
 	n := 0
 	for _, b := range m.targets {
-		if !b.Merged && !b.Current {
+		if ok, _ := deletable(b); ok && b.Merge == git.NotMerged {
 			n++
 		}
 	}
@@ -185,6 +254,45 @@ func (m model) prunableCount() int {
 	return n
 }
 
+// applyView recomputes the visible branches from the filter and sort order,
+// and drops selections that are no longer visible.
+func (m *model) applyView() {
+	needle := strings.ToLower(m.filter)
+	m.visible = m.visible[:0:0]
+	for _, b := range m.branches {
+		if needle == "" || strings.Contains(strings.ToLower(b.Name), needle) {
+			m.visible = append(m.visible, b)
+		}
+	}
+	switch m.sort {
+	case sortNewest:
+		sort.SliceStable(m.visible, func(i, j int) bool { return m.visible[i].Updated.After(m.visible[j].Updated) })
+	case sortOldest:
+		sort.SliceStable(m.visible, func(i, j int) bool { return m.visible[i].Updated.Before(m.visible[j].Updated) })
+	}
+	names := make(map[string]struct{}, len(m.visible))
+	for _, b := range m.visible {
+		names[b.Name] = struct{}{}
+	}
+	for name := range m.selected {
+		if _, ok := names[name]; !ok {
+			delete(m.selected, name)
+		}
+	}
+}
+
+// selectWhere replaces the selection with the deletable visible branches
+// that match, and returns how many there are.
+func (m *model) selectWhere(match func(git.Branch) bool) int {
+	m.selected = make(map[string]struct{})
+	for _, b := range m.visible {
+		if ok, _ := deletable(b); ok && match(b) {
+			m.selected[b.Name] = struct{}{}
+		}
+	}
+	return len(m.selected)
+}
+
 // colSpec describes a table column. Columns with flex share leftover width;
 // a column is dropped when the content area is narrower than minTotal.
 type colSpec struct {
@@ -197,11 +305,11 @@ type colSpec struct {
 var branchCols = []colSpec{
 	{title: " ", width: 1},
 	{title: "Branch", width: 16, flex: 3},
-	{title: "State", width: 8},
+	{title: "State", width: 9},
 	{title: "Sync", width: 8, minTotal: 48},
 	{title: "Upstream", width: 16, flex: 2, minTotal: 100},
 	{title: "Commit", width: 7, minTotal: 64},
-	{title: "Updated", width: 14, minTotal: 80},
+	{title: "Updated", width: 10, minTotal: 80},
 	{title: "Author", width: 16, minTotal: 116},
 	{title: "Subject", width: 20, flex: 3, minTotal: 132},
 }
@@ -259,35 +367,45 @@ func pick(cells []string, visible []bool) table.Row {
 	return row
 }
 
+// stateLabel is the single most relevant fact about a branch.
+func stateLabel(b git.Branch) string {
+	switch {
+	case b.Current:
+		return "current"
+	case b.Worktree != "":
+		return "worktree"
+	case b.Protected:
+		return "protected"
+	case b.Merge != git.NotMerged:
+		return string(b.Merge)
+	case b.Stale:
+		return "stale"
+	}
+	return ""
+}
+
+func syncLabel(b git.Branch) string {
+	switch {
+	case b.Upstream == "":
+		return "local"
+	case b.Gone:
+		return "gone"
+	case b.Ahead > 0 && b.Behind > 0:
+		return fmt.Sprintf("↑%d ↓%d", b.Ahead, b.Behind)
+	case b.Ahead > 0:
+		return fmt.Sprintf("↑%d", b.Ahead)
+	case b.Behind > 0:
+		return fmt.Sprintf("↓%d", b.Behind)
+	}
+	return "synced"
+}
+
 func (m model) branchRow(b git.Branch) []string {
 	mark := ""
 	if _, ok := m.selected[b.Name]; ok {
 		mark = "●"
 	}
-	state := ""
-	switch {
-	case b.Current:
-		state = "current"
-	case b.Worktree != "":
-		state = "worktree"
-	case b.Merged:
-		state = "merged"
-	}
-	sync := "local"
-	switch {
-	case b.Upstream == "":
-	case b.Gone:
-		sync = "gone"
-	case b.Ahead > 0 && b.Behind > 0:
-		sync = fmt.Sprintf("↑%d ↓%d", b.Ahead, b.Behind)
-	case b.Ahead > 0:
-		sync = fmt.Sprintf("↑%d", b.Ahead)
-	case b.Behind > 0:
-		sync = fmt.Sprintf("↓%d", b.Behind)
-	default:
-		sync = "synced"
-	}
-	return []string{mark, b.Name, state, sync, b.Upstream, b.Commit, b.Age, b.Author, b.Subject}
+	return []string{mark, b.Name, stateLabel(b), syncLabel(b), b.Upstream, b.Commit, shortAge(time.Since(b.Updated)), b.Author, b.Subject}
 }
 
 func (m model) worktreeRow(wt git.Worktree) []string {
@@ -318,17 +436,15 @@ func (m model) worktreeRow(wt git.Worktree) []string {
 }
 
 // refreshTables rebuilds columns and rows of both tables for the current
-// data, selection and window size.
+// data, filter, selection and window size.
 func (m *model) refreshTables() {
+	m.applyView()
 	total := m.width - appStyle.GetHorizontalFrameSize()
-	height := m.height - m.chrome()
-	if height < 3 {
-		height = 3
-	}
+	height := m.bodyHeight()
 
 	cols, visible := layoutCols(branchCols, total)
-	rows := make([]table.Row, len(m.branches))
-	for i, b := range m.branches {
+	rows := make([]table.Row, len(m.visible))
+	for i, b := range m.visible {
 		rows[i] = pick(m.branchRow(b), visible)
 	}
 	setTable(&m.branchTable, cols, rows, total, height)
@@ -387,7 +503,7 @@ func (m *model) cancel() {
 	m.status = ""
 }
 
-// run puts the UI into its busy state while cmd executes.
+// run puts the UI into its busy state while op executes.
 func (m *model) run(label string, op func() opDoneMsg) tea.Cmd {
 	m.mode = modeList
 	m.input.Blur()
@@ -416,6 +532,31 @@ func (m model) showPath(p string) string {
 		return s
 	}
 	return "…/" + filepath.Join(filepath.Base(filepath.Dir(p)), filepath.Base(p))
+}
+
+// shortAge renders a duration the way the Updated column shows it, e.g.
+// "5h ago", "3w ago" or "1y 9mo ago".
+func shortAge(d time.Duration) string {
+	const day = 24 * time.Hour
+	switch {
+	case d < time.Minute:
+		return "just now"
+	case d < time.Hour:
+		return fmt.Sprintf("%dm ago", d/time.Minute)
+	case d < day:
+		return fmt.Sprintf("%dh ago", d/time.Hour)
+	case d < 14*day:
+		return fmt.Sprintf("%dd ago", d/day)
+	case d < 60*day:
+		return fmt.Sprintf("%dw ago", d/(7*day))
+	case d < 365*day:
+		return fmt.Sprintf("%dmo ago", d/(30*day))
+	}
+	years, months := d/(365*day), (d%(365*day))/(30*day)
+	if months == 0 || months > 11 {
+		return fmt.Sprintf("%dy ago", years)
+	}
+	return fmt.Sprintf("%dy %dmo ago", years, months)
 }
 
 func truncateLeft(s string, width int) string {
@@ -449,15 +590,18 @@ func expandPath(p string) string {
 	return p
 }
 
+// plural formats a count with "branch", "entry" or "worktree".
 func plural(n int, word string) string {
 	if n == 1 {
-		return fmt.Sprintf("1 %s", word)
+		return "1 " + word
 	}
-	if strings.HasSuffix(word, "h") || strings.HasSuffix(word, "y") {
-		if strings.HasSuffix(word, "y") {
-			return fmt.Sprintf("%d %sies", n, word[:len(word)-1])
-		}
-		return fmt.Sprintf("%d %ses", n, word)
+	switch {
+	case strings.HasSuffix(word, "y"):
+		word = word[:len(word)-1] + "ies"
+	case strings.HasSuffix(word, "h"):
+		word += "es"
+	default:
+		word += "s"
 	}
-	return fmt.Sprintf("%d %ss", n, word)
+	return fmt.Sprintf("%d %s", n, word)
 }

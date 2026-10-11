@@ -1,11 +1,11 @@
-# Built binary
+# Built binary and GoReleaser output
 /deadwood
 /deadwood.exe
 /dist/
 
-# Phantasm: config and the exported memory.json are tracked, runtime state is not
-.phantasm/state/
-
-# Agent tooling backups
+# Local agent tooling: issue tracker, project memory and agent instructions
+.beads/
+.phantasm/
+CLAUDE.md
 CLAUDE.md.bak
 CLAUDE.md.phantasm-backup-*
